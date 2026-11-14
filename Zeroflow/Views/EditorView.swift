@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 
 /// 编辑页主视图：画布 + 底部工具栏
@@ -1115,12 +1116,11 @@ struct EditorView: View {
         let elements = doc.elements
         return await Task.detached(priority: .userInitiated) {
             let exported = Self.exportedImage(image: image, elements: elements)
-            guard let data = exported.pngData,
-                  let rep = NSBitmapImageRep(data: data) else {
+            guard let data = exported.pngData else {
                 ZSLog("export png encode failed")
                 return nil
             }
-            ZSLog("export png: \(rep.pixelsWide)x\(rep.pixelsHigh)px data=\(data.count)")
+            ZSLog("export png: \(Int(exported.size.width))x\(Int(exported.size.height))px data=\(data.count)")
             return data
         }.value
     }
@@ -1283,10 +1283,17 @@ struct EditorView: View {
 // MARK: - 辅助
 
 extension NSImage {
+    /// 直接走 CGImageDestination 编码：避免 `tiffRepresentation` + `NSBitmapImageRep(data:)`
+    /// 在导出峰值时多出两份全尺寸位图（5K 截图可省 100MB+）。
     var pngData: Data? {
-        guard let tiff = tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff) else { return nil }
-        return rep.representation(using: .png, properties: [:])
+        guard let cgImage = cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data, UTType.png.identifier as CFString, 1, nil
+        ) else { return nil }
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
     }
 }
 

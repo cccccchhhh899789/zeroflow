@@ -24,6 +24,11 @@ final class ClipboardHistoryStore: ObservableObject {
     /// 按用途分别缓存解码结果：列表行只留小缩略图，预览封顶 1024px，避免全尺寸解码常驻
     private let thumbnailCache = NSCache<NSString, NSImage>()
     private let previewCache = NSCache<NSString, NSImage>()
+    /// 历史在后台解码；完成前到达的新条目先缓冲，避免被随后落地的旧快照覆盖
+    private var isLoaded = false
+    private var pendingItems: [ClipboardItem] = []
+    /// 清空/重置时递增，作废在途加载结果
+    private var loadGeneration = 0
 
     private init() {
         thumbnailCache.totalCostLimit = 4 * 1024 * 1024
@@ -35,7 +40,7 @@ final class ClipboardHistoryStore: ObservableObject {
         imagesDirectory = baseDirectory.appendingPathComponent("clipboard-images", isDirectory: true)
         historyFile = baseDirectory.appendingPathComponent("clipboard-history.json")
         try? fileManager.createDirectory(at: imagesDirectory, withIntermediateDirectories: true)
-        load()
+        loadInBackground()
     }
 
     // MARK: - 写入
@@ -135,10 +140,14 @@ final class ClipboardHistoryStore: ObservableObject {
 
     /// 按当前「最多保存条数」裁剪（设置页改条数后调用）
     func trimToLimit() {
+        guard isLoaded else { return }
         trimToLimit(persist: true)
     }
 
     func clear() {
+        loadGeneration += 1
+        isLoaded = true
+        pendingItems.removeAll()
         for item in items { removeImageFile(for: item) }
         items.removeAll()
         persist()
@@ -147,6 +156,10 @@ final class ClipboardHistoryStore: ObservableObject {
     // MARK: - 内部
 
     private func insert(_ item: ClipboardItem) {
+        guard isLoaded else {
+            pendingItems.insert(item, at: 0)
+            return
+        }
         // 同一内容再复制只置顶：先移除旧条目（连同其图片文件）
         let duplicates = items.filter { $0.contentHash == item.contentHash && $0.kind == item.kind }
         if !duplicates.isEmpty {
@@ -174,16 +187,36 @@ final class ClipboardHistoryStore: ObservableObject {
         try? fileManager.removeItem(at: url)
     }
 
-    private func load() {
-        guard let data = try? Data(contentsOf: historyFile) else { return }
+    private func loadInBackground() {
+        let generation = loadGeneration
+        let url = historyFile
+        ioQueue.async { [weak self] in
+            let stored = Self.decodeHistory(at: url)
+            DispatchQueue.main.async {
+                guard let self, self.loadGeneration == generation else { return }
+                self.applyLoaded(stored)
+            }
+        }
+    }
+
+    private static func decodeHistory(at url: URL) -> [ClipboardItem] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         guard let stored = try? decoder.decode([ClipboardItem].self, from: data) else {
             ZSLog("clipboard: decode history failed")
-            return
+            return []
         }
-        items = stored
-        trimToLimit(persist: false)
+        return stored
+    }
+
+    private func applyLoaded(_ stored: [ClipboardItem]) {
+        isLoaded = true
+        let pending = pendingItems
+        pendingItems = []
+        let pendingKeys = Set(pending.map { "\($0.kind)-\($0.contentHash)" })
+        items = pending + stored.filter { !pendingKeys.contains("\($0.kind)-\($0.contentHash)") }
+        trimToLimit(persist: !pending.isEmpty)
     }
 
     private func persist() {

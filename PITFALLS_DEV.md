@@ -244,3 +244,18 @@
 - **Pitfall:** 五个 CGEventTap 服务都在 tap 线程 runloop 上常驻一个 2s 重复 `CFRunLoopTimer` 兜底重试;tap 一次装成功后定时器仍在每 2s 唤醒一次 runloop(回调里发现 `eventTap != nil` 直接返回),造成无意义空闲唤醒。
 - **Cause:** `runTapLoop` 先 `installTap` 再 `installRetryTimer`,`CFRunLoopTimerCreate` 的重复间隔不会因 tap 已存在而自动停。
 - **Prevention:** 用属性保存 `retryTimer`;`installTap` 成功后(与置 `eventTap` 同一把锁内)取出并清空,再 `CFRunLoopTimerInvalidate`;`installRetryTimer` 在 `eventTap != nil` 或定时器已存在时直接返回,创建后若 `isRunning` 已为 false 也要 invalidate;`stop()` 里连同 tap 一起 invalidate。这样只有「创建失败」期间才保留 2s 重试。
+
+## DEV-049: 导出 PNG 走 `tiffRepresentation` + `NSBitmapImageRep` 会叠三份全尺寸位图
+- **Pitfall:** `NSImage.pngData` 用 `tiffRepresentation` → `NSBitmapImageRep(data:)` → `representation(using: .png)` 编码时,源位图之外又临时生成 TIFF 数据和第二份解码位图;5K 截图(5120×2880 RGBA,单份≈56MB)实测编码峰值多出约 230MB,而实际 PNG 只有 0.3MB。`encodeExportInBackground` 里再 `NSBitmapImageRep(data:)` 仅为打日志,又多一份全图解码。
+- **Cause:** AppKit 的 TIFF 中转是「先序列化再解码」的旧路径,`representation(using:)` 内部还会复制;这些临时对象都按整图尺寸分配。
+- **Prevention:** 直接 `cgImage(forProposedRect:)` 取底图,用 `CGImageDestinationCreateWithData` + `CGImageDestinationAddImage` + `CGImageDestinationFinalize` 编码(实测同一 5K 图峰值 230MB→68MB);日志尺寸从 `NSImage.size`(导出图按像素 1:1 建)取,别再为日志解码整张 PNG。
+
+## DEV-050: 数据监控的 `@ObservedObject` 要下移到对应卡片,别挂在整个面板内容视图
+- **Pitfall:** `NotchContentView` 顶层 `@ObservedObject` 同时观察系统资源/正在播放,2s 采样一更新就重算整个内容视图,连带日历月网格与全部布局;实际只有一个模块在显示。
+- **Cause:** SwiftUI 的依赖跟踪以「声明了 `@ObservedObject` 的 View」为单位,顶层对象变化会让整个 `body` 失效,与当前显示哪个模块无关。
+- **Prevention:** 顶层只放真正跨模块的依赖(日历 model);给资源/音乐各包一个 `@ObservedObject` 的宿主 View(`ResourceCardHost` / `MusicCardHost`),把该模块的列内容放在宿主闭包里。采样更新只重算宿主子树,日历月网格不参与。
+
+## DEV-051: 历史异步加载后,已弹出的面板还持有加载前的快照
+- **Pitfall:** 剪贴板历史改后台加载后,`ClipboardPanelController.show()` 里的 `ClipboardViewModel(items: store.items)` 是在加载完成前取的快照(首次打开实测 `items=0`,列表空白且不会再变),因为面板不会自动重读 store。
+- **Cause:** view model 的 `items` 是值拷贝,`ClipboardHistoryStore.items` 后续的 `@Published` 更新不会传到模型。
+- **Prevention:** 面板 `observe(model)` 时同时订阅 `ClipboardHistoryStore.shared.$items`(`.dropFirst()`),把新数组写回 `model.items`、夹紧 `selectedIndex`、清掉已失效的 `previewItem`;首次从空变非空时再 `applyFrame` 重算面板尺寸。异步 loader 侧则需要在完成前缓冲 `insert`,并让 `clear()` 递增 generation 作废在途加载。

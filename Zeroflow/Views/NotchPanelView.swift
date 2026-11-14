@@ -292,8 +292,6 @@ struct NotchContentView: View {
     /// 滑动进度驱动器：面板弹簧逐帧写 progress，两个卡片包装视图只观察它做位移。
     /// 这里用普通属性（默认实例）而不是 @ObservedObject，避免整个内容视图按 120Hz 重算
     var slideDriver = CardSlideDriver()
-    @ObservedObject private var resources = SystemResourceMonitor.shared
-    @ObservedObject private var music = NowPlayingMonitor.shared
 
     private let accent = Color.accentColor
     private static let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 7)
@@ -467,8 +465,8 @@ struct NotchContentView: View {
     @ViewBuilder private func moduleView(_ module: Module, inner: CGFloat) -> some View {
         switch module {
         case .calendar: calendarColumn(inner: inner)
-        case .resources: resourcesColumn(inner: inner)
-        case .music: musicColumn(inner: inner)
+        case .resources: ResourceCardHost { resourcesColumn(inner: inner) }
+        case .music: MusicCardHost { musicColumn(inner: inner) }
         }
     }
 
@@ -758,7 +756,7 @@ struct NotchContentView: View {
 
     /// 百分比项当前用量 0–1；nil = 暂不可用（只显示空轨道，环心同步显示「—」）
     private func normalizedProgress(_ item: NotchResourceItem) -> Double? {
-        let s = resources.sample
+        let s = SystemResourceMonitor.shared.sample
         switch item {
         case .cpu: return s.cpuPercent.map { min(1, max(0, $0 / 100)) }
         case .gpu: return s.gpuPercent.map { min(1, max(0, $0 / 100)) }
@@ -771,7 +769,7 @@ struct NotchContentView: View {
 
     /// 迷你趋势图数据（仅速率项 磁盘/网络）：按窗口内峰值归一化（峰值下限 200KB/s 防除零全矮）
     private func normalizedHistory(_ item: NotchResourceItem) -> [Double] {
-        let h = resources.history
+        let h = SystemResourceMonitor.shared.history
         let raw: [Double]
         switch item {
         case .disk: raw = h.disk
@@ -794,7 +792,7 @@ struct NotchContentView: View {
 
     /// 主要项副信息：CPU = 核心数；内存 = 已用 / 总量
     private func primaryDetail(_ item: NotchResourceItem) -> String {
-        let s = resources.sample
+        let s = SystemResourceMonitor.shared.sample
         switch item {
         case .cpu:
             return "\(ProcessInfo.processInfo.processorCount) \(L10n.tr("核"))"
@@ -809,7 +807,7 @@ struct NotchContentView: View {
 
     /// 速率项两行数值：磁盘 = 读/写，网络 = 下行/上行；任一方向有值即显示，双向都缺失显示「—」
     private func rateLines(_ item: NotchResourceItem) -> (read: String, write: String) {
-        let s = resources.sample
+        let s = SystemResourceMonitor.shared.sample
         switch item {
         case .disk:
             guard s.diskReadBps != nil || s.diskWriteBps != nil else {
@@ -842,7 +840,7 @@ struct NotchContentView: View {
     private func musicColumn(inner: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             moduleHeader("music.note", L10n.tr("正在播放"))
-            if let info = music.nowPlaying {
+            if let info = NowPlayingMonitor.shared.nowPlaying {
                 musicBody(info)
             } else {
                 Text(L10n.tr("没有正在播放的音乐"))
@@ -902,15 +900,15 @@ struct NotchContentView: View {
             }
 
             HStack(spacing: 18) {
-                musicButton("backward.fill", L10n.tr("上一首"), disabled: !music.controlsAvailable) {
+                musicButton("backward.fill", L10n.tr("上一首"), disabled: !NowPlayingMonitor.shared.controlsAvailable) {
                     NowPlayingMonitor.shared.send(.previous)
                 }
                 musicButton(info.isPlaying ? "pause.fill" : "play.fill",
                             info.isPlaying ? L10n.tr("暂停") : L10n.tr("播放"),
-                            disabled: !music.controlsAvailable) {
+                            disabled: !NowPlayingMonitor.shared.controlsAvailable) {
                     NowPlayingMonitor.shared.send(.togglePlay)
                 }
-                musicButton("forward.fill", L10n.tr("下一首"), disabled: !music.controlsAvailable) {
+                musicButton("forward.fill", L10n.tr("下一首"), disabled: !NowPlayingMonitor.shared.controlsAvailable) {
                     NowPlayingMonitor.shared.send(.next)
                 }
             }
@@ -1126,6 +1124,20 @@ struct NotchContentView: View {
             }
         }
     }
+}
+
+private struct ResourceCardHost<Content: View>: View {
+    @ObservedObject private var monitor = SystemResourceMonitor.shared
+    let content: () -> Content
+
+    var body: some View { content() }
+}
+
+private struct MusicCardHost<Content: View>: View {
+    @ObservedObject private var monitor = NowPlayingMonitor.shared
+    let content: () -> Content
+
+    var body: some View { content() }
 }
 
 /// 资源项的环形仪表：灰色轨道 = 无用量参照，彩色弧（各资源项各自的色相）= 当前用量

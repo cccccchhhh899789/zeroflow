@@ -116,10 +116,6 @@ final class DockHoverPreviewController {
     private var panel: DockPreviewPanel?
     private let model = DockPreviewViewModel()
     private var keyMonitor: Any?
-    /// 应用生命周期内的缩略图缓存（主线程读写）：抓到过就一直用，
-    /// 悬停时先显旧图再换新图，避免 WindowThumbnailer TTL(5s)/节流(0.8s)导致的空面板
-    private var thumbnailCache: [CGWindowID: NSImage] = [:]
-    private var lastCacheRefreshAt = Date.distantPast
     /// 面板 orderFront 状态镜像（主线程）：软隐藏后置 false，present 后置 true
     private var panelShown = false
 
@@ -176,12 +172,6 @@ final class DockHoverPreviewController {
         t.qualityOfService = .userInitiated
         thread = t
         t.start()
-        // 启动预热：抓一次全量窗口缩略图进缓存（允许旧图），首次悬停即有图
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self, SettingsStore.shared.dockPreviewEnabled else { return }
-            let windows = WindowList.shared.enumerate().filter { !$0.isWindowlessApp }
-            self.refreshThumbnailCacheAsync(for: windows)
-        }
         ZSLog("DockHoverPreview: started")
     }
 
@@ -200,7 +190,13 @@ final class DockHoverPreviewController {
 
         removeKeyMonitor()
         DispatchQueue.main.async { [weak self] in
-            self?.panel?.orderOut(nil)
+            guard let self else { return }
+            self.panel?.orderOut(nil)
+            self.panel?.teardown()
+            self.model.items = []
+            self.currentTarget = nil
+            self.currentWindows = []
+            self.panelShown = false
         }
         if let source, let runLoop {
             CFRunLoopRemoveSource(runLoop, source, .commonModes)
@@ -598,11 +594,11 @@ final class DockHoverPreviewController {
         let dismiss = { [weak self] in
             guard let self else { return }
             self.panel?.orderOut(nil)
+            self.panel?.teardown()
             self.panelShown = false
-            let shown = self.currentWindows
+            self.model.items = []
             self.currentTarget = nil
             self.currentWindows = []
-            self.refreshThumbnailCacheAsync(for: shown)
         }
         if Thread.isMainThread {
             dismiss()
@@ -611,20 +607,6 @@ final class DockHoverPreviewController {
         }
     }
 
-    /// 静默刷新一批窗口的缩略图缓存（节流 3s），只补缓存不碰面板 UI。
-    /// 用于启动预热与面板收起后，保证下次悬停立即有图（允许旧图）。
-    private func refreshThumbnailCacheAsync(for windows: [SwitcherWindow]) {
-        guard !windows.isEmpty else { return }
-        let now = Date()
-        guard now.timeIntervalSince(lastCacheRefreshAt) > 3 else { return }
-        lastCacheRefreshAt = now
-        WindowThumbnailer.shared.fetchThumbnails(for: windows) { [weak self] images in
-            guard let self else { return }
-            for (windowID, image) in images {
-                self.thumbnailCache[windowID] = image
-            }
-        }
-    }
     // MARK: - 解析与展示（workQueue → 主线程）
 
     /// 延时到期：AX 权威命中 → 过滤窗口 → 主线程展示。
@@ -806,12 +788,12 @@ final class DockHoverPreviewController {
         }
     }
 
-    /// 组装卡片模型：直接用窗口数据，先用持久缓存里的旧图占位（抓到过就一直有），
+    /// 组装卡片模型：先用 WindowThumbnailer 的缓存旧图占位（抓过就有），
     /// 新图抓到后在 applyThumbnails 替换，避免空面板/闪烁。
     private func makeItems(_ windows: [SwitcherWindow]) -> [SwitcherWindow] {
         windows.map { window in
             var item = window
-            item.thumbnail = thumbnailCache[window.id]
+            item.thumbnail = WindowThumbnailer.shared.cachedThumbnail(for: window.id)
             return item
         }
     }
@@ -863,10 +845,6 @@ final class DockHoverPreviewController {
         let live = generation == self.showGen && phase == .visible
         lock.unlock()
         guard live else { return }
-        // 新图先入持久缓存：即使下次抓取失败/被节流，卡片也不会变回空占位
-        for (windowID, image) in images {
-            thumbnailCache[windowID] = image
-        }
         for (index, item) in model.items.enumerated() {
             if let image = images[item.id] {
                 model.items[index].thumbnail = image

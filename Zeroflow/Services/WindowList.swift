@@ -227,7 +227,7 @@ final class WindowList {
                 app: app,
                 title: title,
                 appName: appName,
-                appIcon: app.icon,
+                appIcon: AppIconCache.shared.icon(for: app),
                 bounds: r.bounds,
                 isMinimized: r.minimized || (!r.isOnscreen && !CGSWindowServer.shared.isAvailable),
                 workspace: r.workspace
@@ -252,7 +252,7 @@ final class WindowList {
                         app: app,
                         title: name,
                         appName: name,
-                        appIcon: app.icon,
+                        appIcon: AppIconCache.shared.icon(for: app),
                         bounds: .zero,
                         isMinimized: false,
                         workspace: -1

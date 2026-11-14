@@ -955,14 +955,8 @@ struct NotchContentView: View {
         .frame(width: 22, height: 22)
     }
 
-    private static let iconCache = NSCache<NSString, NSImage>()
-
     private static func icon(forBundleID bid: String) -> NSImage? {
-        if let cached = iconCache.object(forKey: bid as NSString) { return cached }
-        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bid }),
-              let icon = app.icon else { return nil }
-        iconCache.setObject(icon, forKey: bid as NSString)
-        return icon
+        AppIconCache.shared.icon(forBundleID: bid)
     }
 
     private func musicButton(_ symbol: String, _ label: String, disabled: Bool, action: @escaping () -> Void) -> some View {
@@ -1494,7 +1488,25 @@ final class NotchPanel: NSPanel {
         springAnimator.animate(to: notchState, tuning: NotchSpringAnimator.collapseTuning,
                                lead: 2) { [weak self] in
             self?.orderOut(nil)
+            self?.teardownContent()
         }
+    }
+
+    /// 收起动画结束后释放内容树与 present 上下文（下次 present 重建）。
+    /// 打断收起时在途 completion 会作废，不会误释放新内容。
+    private func teardownContent() {
+        contentView = nil
+        shapeContainer = nil
+        contentHosting = nil
+        lastScreen = nil
+        lastNotchSize = .zero
+        lastNotchTL = .zero
+        lastModel = nil
+        displayedModule = nil
+        currentSlide = nil
+        lastLayout = nil
+        onNavigateModule = nil
+        slideDriver.progress = 1
     }
 
     /// 终点 frame：顶边贴屏幕顶（盖住刘海）、水平居中于刘海、钳制进屏幕左右各 8pt

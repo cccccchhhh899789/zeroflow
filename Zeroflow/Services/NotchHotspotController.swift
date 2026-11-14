@@ -479,6 +479,7 @@ final class NotchHotspotController {
             self.panelShown = false
             self.dayEventsCancellable = nil
             self.lastPresented = nil
+            self.model = nil
             SystemResourceMonitor.shared.setActive(false)
             NowPlayingMonitor.shared.setActive(false)
             // 视觉收起交给面板：弹簧缩回刘海再 orderOut；期间再 present 会无缝续接展开

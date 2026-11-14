@@ -108,6 +108,7 @@ SwiftUI 视图 + AppKit/CG/AX(含私有 API dlsym 桥)服务层 + UserDefaults/A
 | 文件 | 职责 |
 |---|---|
 | `AccessibilityPermission.swift` | 辅助功能权限检测与引导跳系统设置 |
+| `AppIconCache.swift` | App 图标降采样缓存：统一 128×128 单表示位图（NSCache），避免整套多尺寸图标常驻 |
 | `AXWindow.swift` | AX 窗口元素查找:`_AXUIElementGetWindow` 精确匹配(禁 bounds 模糊兜底)、remote-token 暴力枚举 |
 | `CalendarService.swift` | EventKit 门面:授权状态/请求(macOS 14 全量)、区间日程查询(未授权返回 [],后台线程调用) |
 | `CaptureCoordinator.swift` | 截图流程协调:权限→遮罩→捕获→编辑页,`isActive` 防重入 |

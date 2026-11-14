@@ -134,6 +134,9 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         guard let panel, panel.isVisible, !isDismissing else { return }
         isDismissing = true
         panel.orderOut(nil)
+        // 释放 SwiftUI 内容树与液态玻璃背景；下次弹出由 show() 重建
+        panel.contentView = nil
+        model = nil
         isDismissing = false
         cancellables.removeAll()
         ZSLog("clipboard panel dismissed")

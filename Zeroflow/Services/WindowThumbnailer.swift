@@ -5,25 +5,44 @@ import Darwin
 /// 窗口缩略图抓取：SkyLight 私有 API `CGSHWCaptureWindowList`（运行时 dlsym 桥接）。
 /// - 能截取最小化/离屏窗口（公开 API ScreenCaptureKit 截不到最小化窗口）。
 /// - 全程后台单队列执行，逐窗口调用（该 API 实际只认窗口列表第一个，批量传会丢结果）。
-/// - 按 CGWindowID 缓存（会话间 TTL ≈ 5s）；同一窗口 800ms 内不重复抓。
+/// - 按 CGWindowID 缓存（TTL ≈ 10s）；同一窗口 800ms 内不重复抓。
+/// - 抓到一张就立刻缩放到卡片所需尺寸，不批量持有全分辨率图（避免抓取峰值上百 MB）。
+/// - 缓存用 NSCache（按像素字节计 cost，总量有界），长时间运行不会无限增长。
 /// - 抓取失败/API 缺失时静默降级（面板显示 app 图标），不弹错不崩溃。
 final class WindowThumbnailer {
     static let shared = WindowThumbnailer()
 
+    private final class CachedThumbnail {
+        let image: NSImage
+        let date: Date
+
+        init(image: NSImage, date: Date) {
+            self.image = image
+            self.date = date
+        }
+    }
+
     private let queue = DispatchQueue(label: "zeroflow.window-thumbnailer", qos: .userInitiated)
     private let lock = NSLock()
-    private var cache: [CGWindowID: (image: NSImage, date: Date)] = [:]
+    private let cache = NSCache<NSNumber, CachedThumbnail>()
     private var lastAttempt: [CGWindowID: Date] = [:]
     private static var didLogBridgeFailure = false
 
     // AltTab 实际使用的选项位（旧版头文件的 0x04|0x10|0x20 已失效，传 0x34 会返回空）：
     // ignoreGlobalClipShape=1<<11, bestResolution=1<<8, fullSize=1<<19
     private static let captureOptions: Int32 = (1 << 11) | (1 << 8) | (1 << 19)
-    private let cacheTTL: TimeInterval = 5
+    private let cacheTTL: TimeInterval = 10
     private let captureThrottle: TimeInterval = 0.8
-    private static let maxThumbSide: CGFloat = 320
-    /// 缩略图缓存上限：超出时淘汰最旧的（内存有界，长时间运行不会无限增长）
-    private static let maxCacheCount = 30
+    /// 卡片实际显示宽度 148~168pt，2x 屏最多 336px；168 足够且比 320 省 4 倍像素
+    private static let maxThumbSide: CGFloat = 168
+    /// 缩略图缓存上限：按像素字节计 cost，超出即淘汰（长时间运行内存有界）
+    private static let cacheCostLimit = 8 * 1024 * 1024
+    private static let cacheCountLimit = 40
+
+    private init() {
+        cache.totalCostLimit = Self.cacheCostLimit
+        cache.countLimit = Self.cacheCountLimit
+    }
 
     private struct CaptureBridge {
         let mainConn: @convention(c) () -> Int32
@@ -47,7 +66,8 @@ final class WindowThumbnailer {
 
     func invalidateCache() {
         lock.lock()
-        cache.removeAll()
+        cache.removeAllObjects()
+        lastAttempt.removeAll()
         lock.unlock()
     }
 
@@ -62,6 +82,17 @@ final class WindowThumbnailer {
         }
     }
 
+    /// 同步读取缓存里的缩略图（不触发抓取、不刷新 TTL）：
+    /// 面板先用旧图预填，避免 WindowThumbnailer 节流/TTL 期间出现空占位。
+    func cachedThumbnail(for windowID: CGWindowID) -> NSImage? {
+        lock.lock()
+        defer { lock.unlock() }
+        let key = NSNumber(value: windowID)
+        guard let entry = cache.object(forKey: key),
+              Date().timeIntervalSince(entry.date) < cacheTTL else { return nil }
+        return entry.image
+    }
+
     private func captureAll(windows: [SwitcherWindow]) -> [CGWindowID: NSImage] {
         guard let bridge = Self.bridge else {
             if !Self.didLogBridgeFailure {
@@ -72,65 +103,45 @@ final class WindowThumbnailer {
         }
         let now = Date()
         var out: [CGWindowID: NSImage] = [:]
-        var missing: [CGWindowID] = []
+        var missing: [(id: CGWindowID, bounds: CGRect)] = []
 
         lock.lock()
         for w in windows {
-            if let entry = cache[w.id], now.timeIntervalSince(entry.date) < cacheTTL {
+            let key = NSNumber(value: w.id)
+            if let entry = cache.object(forKey: key), now.timeIntervalSince(entry.date) < cacheTTL {
                 out[w.id] = entry.image
             } else if let last = lastAttempt[w.id], now.timeIntervalSince(last) < captureThrottle {
                 // 节流：不在短时间内重复抓同一窗口
             } else {
                 lastAttempt[w.id] = now
-                missing.append(w.id)
+                missing.append((w.id, w.bounds))
             }
         }
         lock.unlock()
 
         guard !missing.isEmpty else { return out }
 
-        let boundsMap = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0.bounds) })
-        let captured = capture(wids: missing, boundsMap: boundsMap, bridge: bridge)
-        lock.lock()
-        for (wid, image) in captured {
-            guard let image else { continue }
-            let size = boundsMap[wid] ?? CGRect(x: 0, y: 0, width: 16, height: 10)
-            let thumb = resized(image, bounds: size)
-            cache[wid] = (thumb, now)
-            out[wid] = thumb
-        }
-        pruneCache(now: now)
-        lock.unlock()
-        return out
-    }
-
-    /// 钳制缓存内存：清掉超过 TTL 的过期条目（下次会话反正要重新抓），
-    /// 再超过数量上限时淘汰最旧的，保证长时间运行下缓存有界。
-    /// 节流表 `lastAttempt` 同样只增不删，一并按 TTL 清理。
-    private func pruneCache(now: Date) {
-        cache = cache.filter { now.timeIntervalSince($0.value.date) < cacheTTL }
-        lastAttempt = lastAttempt.filter { now.timeIntervalSince($0.value) < cacheTTL }
-        if cache.count > Self.maxCacheCount {
-            let byNewest = cache.sorted { $0.value.date > $1.value.date }
-            cache = Dictionary(uniqueKeysWithValues: byNewest.prefix(Self.maxCacheCount).map { ($0.key, $0.value) })
-        }
-    }
-
-    /// 逐窗口调用私有 API，返回 `[CGWindowID: CGImage?]`。
-    /// 该 API 只认窗口列表里的第一个（AltTab 源码注释），批量传会丢其余窗口，故逐窗口调用。
-    private func capture(wids: [CGWindowID],
-                         boundsMap: [CGWindowID: CGRect],
-                         bridge: CaptureBridge) -> [CGWindowID: CGImage?] {
-        var result: [CGWindowID: CGImage?] = [:]
         let cid = bridge.mainConn()
-        for wid in wids {
-            var id = wid
-            if let array = bridge.captureList(cid, &id, 1, Self.captureOptions)?.takeRetainedValue() as? [CGImage],
-               let image = array.first {
-                result[wid] = image
+        for target in missing {
+            // 逐张抓取后立刻缩放并释放原图：批量持有全分辨率 CGImage 会让峰值冲到上百 MB
+            autoreleasepool {
+                var id = target.id
+                guard let array = bridge.captureList(cid, &id, 1, Self.captureOptions)?.takeRetainedValue() as? [CGImage],
+                      let image = array.first else { return }
+                let thumb = resized(image, bounds: target.bounds)
+                let cost = Int(thumb.size.width * 2 * thumb.size.height * 2 * 4)
+                lock.lock()
+                cache.setObject(CachedThumbnail(image: thumb, date: now), forKey: NSNumber(value: target.id), cost: cost)
+                out[target.id] = thumb
+                lock.unlock()
             }
         }
-        return result
+
+        // 节流表只增不删会缓慢膨胀，按 TTL 清理
+        lock.lock()
+        lastAttempt = lastAttempt.filter { now.timeIntervalSince($0.value) < cacheTTL }
+        lock.unlock()
+        return out
     }
 
     /// 按窗口宽高比把原始 CGImage 缩放到缩略图尺寸（2x 物理像素，控制驻留内存）

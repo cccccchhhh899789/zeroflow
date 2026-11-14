@@ -227,7 +227,7 @@ struct ClipboardPanelView: View {
                 .foregroundColor(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .image:
-            if let image = ClipboardHistoryStore.shared.image(for: item) {
+            if let image = ClipboardHistoryStore.shared.thumbnail(for: item) {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -335,7 +335,7 @@ struct ClipboardPanelView: View {
                     .padding(12)
             }
         case .image:
-            if let image = ClipboardHistoryStore.shared.image(for: item) {
+            if let image = ClipboardHistoryStore.shared.previewImage(for: item) {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.high)

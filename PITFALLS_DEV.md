@@ -234,3 +234,13 @@
 - **Pitfall:** 改系统「自然滚动」偏好(`com.apple.swipescrolldirection`)会把触控板一起反转;在 CGEventTap 里不区分来源,两指滚动也会被翻转;不排除 `eventSourceUnixProcessID != 0` 的事件,会和其他滚动工具(或驱动软件)叠加成双重反转。把 `DeltaAxis` 取反后立即读回 `PointDelta` 会发现系统已按倍数重算;若先写 Point/FixedPt 再写 DeltaAxis,取反结果被覆盖,方向偶发不生效。
 - **Cause:** 触控板与妙控鼠标的 scrollWheel 恒为 `scrollWheelEventIsContinuous == 1`,传统滚轮鼠标为 0;手势/惯性阶段的事件同样进 tap。`CGEventSetIntegerValueField(kCGScrollWheelEventDeltaAxis1)` 会让 macOS 内部重算 `FixedPtDelta`(1x)与 `PointDelta`(实测合成 line 事件是 10x),覆盖顺序决定最终增量。
 - **Prevention:** 只对 `continuous == 0 && scrollPhase == 0 && momentumPhase == 0 && pid == 0` 的事件取反,垂直/水平分别处理 axis1/axis2;写字段顺序固定为 `DeltaAxis → FixedPtDelta → PointDelta`(后写保住高精度滚轮的加速度),实测取反后三个字段同号且量级不变。tap 需辅助功能权限:沿用 `DockClickMinimizer` 的独立线程 runloop + 2s 重试建 tap(授权后无需重启),布局校验用 `ZEROFLOW_SCROLL_DEBUG=1` 打印 `continuous/phase/momentum/pid/增量`,触控板事件应全部是 continuous=1。
+
+## DEV-047: 剪贴板图片不要用 `NSImage(contentsOf:)` 全量解码做缩略图/预览
+- **Pitfall:** 列表行只要 22pt 图,却对历史图片整张 `NSImage(contentsOf:)` 解码并放进无上限 `NSCache`;一张 2940×1912 的剪贴板 PNG 就多出 20+MB `Image IO` 脏页,面板关闭后仍常驻(实测 60MB,其中 Image IO 27MB)。`ClipboardMonitor` 只是读像素尺寸也用 `NSBitmapImageRep(data:)`,同样触发整张解码。
+- **Cause:** `NSImage` 是惰性容器,一旦被 SwiftUI 渲染就按原尺寸建立位图;`Image(nsImage:).resizable()` 不会阻止这次全尺寸解码。尺寸信息在文件头里,不需要像素数据。
+- **Prevention:** 用 ImageIO 按用途出图:`CGImageSourceCreateWithURL` + `CGImageSourceCreateThumbnailAtIndex`(列表 `maxPixelSize` 64、预览 1024,`CreateThumbnailFromImageAlways`),代价按 `宽×高×4` 记入带 `totalCostLimit` 的 `NSCache`;读尺寸用 `CGImageSourceCopyPropertiesAtIndex` 的 `kCGImagePropertyPixelWidth/Height`,不要构造 `NSBitmapImageRep`。缩略图上限取 `min(maxPixelSize, 原图长边)`,避免小图被放大。
+
+## DEV-048: tap 安装成功后必须 invalidate 2s 重试定时器
+- **Pitfall:** 五个 CGEventTap 服务都在 tap 线程 runloop 上常驻一个 2s 重复 `CFRunLoopTimer` 兜底重试;tap 一次装成功后定时器仍在每 2s 唤醒一次 runloop(回调里发现 `eventTap != nil` 直接返回),造成无意义空闲唤醒。
+- **Cause:** `runTapLoop` 先 `installTap` 再 `installRetryTimer`,`CFRunLoopTimerCreate` 的重复间隔不会因 tap 已存在而自动停。
+- **Prevention:** 用属性保存 `retryTimer`;`installTap` 成功后(与置 `eventTap` 同一把锁内)取出并清空,再 `CFRunLoopTimerInvalidate`;`installRetryTimer` 在 `eventTap != nil` 或定时器已存在时直接返回,创建后若 `isRunning` 已为 false 也要 invalidate;`stop()` 里连同 tap 一起 invalidate。这样只有「创建失败」期间才保留 2s 重试。

@@ -126,6 +126,7 @@ final class DockHoverPreviewController {
     private weak var tapRunLoop: CFRunLoop?
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var retryTimer: CFRunLoopTimer?
     private var workspaceObservers: [NSObjectProtocol] = []
     private let workQueue = DispatchQueue(label: "zeroflow.dock-hover-preview", qos: .userInitiated)
     private let cacheQueue = DispatchQueue(label: "zeroflow.dock-hover-cache")
@@ -183,7 +184,9 @@ final class DockHoverPreviewController {
         let runLoop = tapRunLoop
         let source = runLoopSource
         let tap = eventTap
+        let retry = retryTimer
         eventTap = nil
+        retryTimer = nil
         runLoopSource = nil
         tapRunLoop = nil
         lock.unlock()
@@ -203,6 +206,7 @@ final class DockHoverPreviewController {
             CFRunLoopStop(runLoop)
         }
         if let tap { CFMachPortInvalidate(tap) }
+        if let retry { CFRunLoopTimerInvalidate(retry) }
         thread = nil
         ZSLog("DockHoverPreview: stopped")
     }
@@ -235,7 +239,12 @@ final class DockHoverPreviewController {
             ZSLog("DockHoverPreview: tap create failed (no accessibility permission?)")
             return
         }
-        lock.lock(); eventTap = tap; lock.unlock()
+        lock.lock()
+        eventTap = tap
+        let retry = retryTimer
+        retryTimer = nil
+        lock.unlock()
+        if let retry { CFRunLoopTimerInvalidate(retry) }
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(runLoop, source, .commonModes)
         lock.lock(); runLoopSource = source; lock.unlock()
@@ -243,6 +252,11 @@ final class DockHoverPreviewController {
     }
 
     private func installRetryTimer(in runLoop: CFRunLoop) {
+        lock.lock()
+        let hasTap = eventTap != nil
+        let alreadyArmed = retryTimer != nil
+        lock.unlock()
+        guard !hasTap, !alreadyArmed else { return }
         var ctx = CFRunLoopTimerContext(
             version: 0,
             info: Unmanaged.passUnretained(self).toOpaque(),
@@ -259,7 +273,16 @@ final class DockHoverPreviewController {
             Self.retryTimerCallback,
             &ctx
         )
-        if let timer { CFRunLoopAddTimer(runLoop, timer, .commonModes) }
+        guard let timer else { return }
+        lock.lock()
+        guard isRunning else {
+            lock.unlock()
+            CFRunLoopTimerInvalidate(timer)
+            return
+        }
+        retryTimer = timer
+        lock.unlock()
+        CFRunLoopAddTimer(runLoop, timer, .commonModes)
     }
 
     private func retryCreateTapIfNeeded() {

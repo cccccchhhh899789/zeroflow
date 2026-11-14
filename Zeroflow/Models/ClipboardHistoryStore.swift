@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import CryptoKit
+import ImageIO
 
 /// 剪贴板历史存储：去重置顶、按设置裁剪条数、JSON 持久化到 Application Support。
 /// 图片存 `Application Support/zeroflow/clipboard-images/`，裁剪/清空时同步删除文件。
@@ -20,9 +21,13 @@ final class ClipboardHistoryStore: ObservableObject {
     private let historyFile: URL
     /// 编码/写盘放串行后台队列，避免大历史阻塞主线程；顺序由队列保证
     private let ioQueue = DispatchQueue(label: "zeroflow.clipboard-history.io", qos: .utility)
-    private let imageCache = NSCache<NSString, NSImage>()
+    /// 按用途分别缓存解码结果：列表行只留小缩略图，预览封顶 1024px，避免全尺寸解码常驻
+    private let thumbnailCache = NSCache<NSString, NSImage>()
+    private let previewCache = NSCache<NSString, NSImage>()
 
     private init() {
+        thumbnailCache.totalCostLimit = 4 * 1024 * 1024
+        previewCache.totalCostLimit = 24 * 1024 * 1024
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support", isDirectory: true)
@@ -90,13 +95,40 @@ final class ClipboardHistoryStore: ObservableObject {
         return try? Data(contentsOf: url)
     }
 
-    func image(for item: ClipboardItem) -> NSImage? {
+    func thumbnail(for item: ClipboardItem) -> NSImage? {
+        decodedImage(for: item, maxPixelSize: 64, cache: thumbnailCache, keyPrefix: "thumb:")
+    }
+
+    func previewImage(for item: ClipboardItem) -> NSImage? {
+        decodedImage(for: item, maxPixelSize: 1024, cache: previewCache, keyPrefix: "preview:")
+    }
+
+    private func decodedImage(for item: ClipboardItem,
+                              maxPixelSize: Int,
+                              cache: NSCache<NSString, NSImage>,
+                              keyPrefix: String) -> NSImage? {
         guard let url = imageURL(for: item) else { return nil }
-        let key = url.lastPathComponent as NSString
-        if let cached = imageCache.object(forKey: key) { return cached }
-        guard let image = NSImage(contentsOf: url) else { return nil }
-        imageCache.setObject(image, forKey: key)
+        let key = Self.cacheKey(prefix: keyPrefix, url: url)
+        if let cached = cache.object(forKey: key) { return cached }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let pixelWidth = properties?[kCGImagePropertyPixelWidth] as? Int ?? maxPixelSize
+        let pixelHeight = properties?[kCGImagePropertyPixelHeight] as? Int ?? maxPixelSize
+        let limit = min(maxPixelSize, max(pixelWidth, pixelHeight))
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: limit,
+        ] as CFDictionary)
+        else { return nil }
+        let image = NSImage(cgImage: cgImage,
+                            size: NSSize(width: cgImage.width, height: cgImage.height))
+        cache.setObject(image, forKey: key, cost: cgImage.width * cgImage.height * 4)
         return image
+    }
+
+    private static func cacheKey(prefix: String, url: URL) -> NSString {
+        "\(prefix)\(url.lastPathComponent)" as NSString
     }
 
     // MARK: - 维护
@@ -137,7 +169,8 @@ final class ClipboardHistoryStore: ObservableObject {
 
     private func removeImageFile(for item: ClipboardItem) {
         guard let url = imageURL(for: item) else { return }
-        imageCache.removeObject(forKey: url.lastPathComponent as NSString)
+        thumbnailCache.removeObject(forKey: Self.cacheKey(prefix: "thumb:", url: url))
+        previewCache.removeObject(forKey: Self.cacheKey(prefix: "preview:", url: url))
         try? fileManager.removeItem(at: url)
     }
 

@@ -50,6 +50,7 @@ final class DockClickMinimizer {
     private weak var tapRunLoop: CFRunLoop?
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var retryTimer: CFRunLoopTimer?
 
     // MARK: - 单击候选（按下登记 → 快速抬起判定；超时/拖拽交回系统）
 
@@ -205,7 +206,9 @@ final class DockClickMinimizer {
         let runLoop = tapRunLoop
         let source = runLoopSource
         let tap = eventTap
+        let retry = retryTimer
         eventTap = nil
+        retryTimer = nil
         runLoopSource = nil
         tapRunLoop = nil
         lock.unlock()
@@ -215,6 +218,7 @@ final class DockClickMinimizer {
             CFRunLoopStop(runLoop)
         }
         if let tap { CFMachPortInvalidate(tap) }
+        if let retry { CFRunLoopTimerInvalidate(retry) }
         thread = nil
     }
 
@@ -244,7 +248,12 @@ final class DockClickMinimizer {
             ZSLog("DockClickMinimizer: tap create failed (no accessibility permission?)")
             return
         }
-        lock.lock(); eventTap = tap; lock.unlock()
+        lock.lock()
+        eventTap = tap
+        let retry = retryTimer
+        retryTimer = nil
+        lock.unlock()
+        if let retry { CFRunLoopTimerInvalidate(retry) }
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(runLoop, source, .commonModes)
         lock.lock(); runLoopSource = source; lock.unlock()
@@ -253,6 +262,11 @@ final class DockClickMinimizer {
     }
 
     private func installRetryTimer(in runLoop: CFRunLoop) {
+        lock.lock()
+        let hasTap = eventTap != nil
+        let alreadyArmed = retryTimer != nil
+        lock.unlock()
+        guard !hasTap, !alreadyArmed else { return }
         var ctx = CFRunLoopTimerContext(
             version: 0,
             info: Unmanaged.passUnretained(self).toOpaque(),
@@ -269,7 +283,16 @@ final class DockClickMinimizer {
             Self.retryTimerCallback,
             &ctx
         )
-        if let timer { CFRunLoopAddTimer(runLoop, timer, .commonModes) }
+        guard let timer else { return }
+        lock.lock()
+        guard isRunning else {
+            lock.unlock()
+            CFRunLoopTimerInvalidate(timer)
+            return
+        }
+        retryTimer = timer
+        lock.unlock()
+        CFRunLoopAddTimer(runLoop, timer, .commonModes)
     }
 
     private func retryCreateTapIfNeeded() {

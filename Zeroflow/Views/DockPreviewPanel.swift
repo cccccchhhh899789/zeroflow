@@ -150,9 +150,10 @@ final class DockPreviewPanel: NSPanel {
     /// 按当前内容测量尺寸，并按锚点与朝向定位（present / refit 共用）。
     private func layoutAndPosition() {
         guard let anchorTL else { return }
-        // AX/CGEvent 全局坐标（主屏左上原点）→ Cocoa 全局坐标（左下原点）
-        let unionMaxY = NSScreen.screens.reduce(CGRect.null) { $0.union($1.frame) }.maxY
-        let anchorCocoa = CGRect(x: anchorTL.minX, y: unionMaxY - anchorTL.maxY,
+        // AX/CGEvent 全局坐标（主屏左上原点）→ Cocoa 全局坐标（左下原点）。
+        // 翻转基准必须是**主屏**（Cocoa 原点所在屏）的 maxY：用所有屏并集的 maxY 只在
+        // 「主屏恰好在最上方」时成立，外接屏摆到主屏上方时面板会整体偏移一块屏高。
+        let anchorCocoa = CGRect(x: anchorTL.minX, y: Self.flipMaxY - anchorTL.maxY,
                                  width: anchorTL.width, height: anchorTL.height)
         let center = CGPoint(x: anchorCocoa.midX, y: anchorCocoa.midY)
         let screen = NSScreen.screens.first { $0.frame.contains(center) }
@@ -191,5 +192,14 @@ final class DockPreviewPanel: NSPanel {
     private static func clamp(_ value: CGFloat, _ minValue: CGFloat, _ maxValue: CGFloat) -> CGFloat {
         guard maxValue >= minValue else { return minValue }
         return min(max(value, minValue), maxValue)
+    }
+
+    /// Cocoa ↔ 左上原点全局坐标的翻转基准：主屏（Cocoa 原点所在屏）的 maxY。
+    /// 取不到主屏时退回所有屏并集的 maxY。
+    private static var flipMaxY: CGFloat {
+        if let primary = NSScreen.screens.first(where: { $0.frame.minX == 0 && $0.frame.minY == 0 }) {
+            return primary.frame.maxY
+        }
+        return NSScreen.screens.reduce(CGRect.null) { $0.union($1.frame) }.maxY
     }
 }

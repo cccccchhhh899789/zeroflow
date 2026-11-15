@@ -311,7 +311,7 @@ struct SettingsView: View {
             if store.dockPreviewEnabled {
                 Section {
                     VStack(alignment: .leading, spacing: 6) {
-                        LabeledContent(L10n.tr("悬停延时")) {
+                        LabeledContent(L10n.tr("弹出延迟")) {
                             Text("\(store.dockPreviewHoverDelayMs) ms")
                                 .monospacedDigit()
                                 .foregroundColor(.secondary)
@@ -321,10 +321,22 @@ struct SettingsView: View {
                             set: { store.dockPreviewHoverDelayMs = Int($0) }
                         ), in: 100...1000, step: 50)
                     }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        LabeledContent(L10n.tr("收起延迟")) {
+                            Text("\(store.dockPreviewHideDelayMs) ms")
+                                .monospacedDigit()
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(value: Binding(
+                            get: { Double(store.dockPreviewHideDelayMs) },
+                            set: { store.dockPreviewHideDelayMs = Int($0) }
+                        ), in: 0...2000, step: 100)
+                    }
                 } header: {
                     Text(L10n.tr("选项"))
                 } footer: {
-                    Text(L10n.tr("鼠标停留在 Dock 图标上多久后弹出预览。"))
+                    Text(L10n.tr("弹出延迟：鼠标停留在 Dock 图标上多久后弹出预览。收起延迟：鼠标离开图标与面板后多久收起——调大可让鼠标从容地从图标移到预览面板上。"))
                 }
 
                 Section {

@@ -290,3 +290,46 @@
 - **Pitfall:** 在受限沙箱(自动化/agent 进程)里构建时,凡是带 `@State`/`@Published` 的文件全部编译失败:`external macro implementation type 'SwiftUIMacros.StateMacro' could not be found for macro 'State()'; .../swift-plugin-server produced malformed response`,同时 stderr 有一行 `sandbox-exec: sandbox_apply: Operation not permitted`。看起来像工程/SDK 问题,实际与代码无关(新建最小 `@State` 用例同样失败)。
 - **Cause:** 宏展开由独立进程 `swift-plugin-server` 完成,它启动时会给自己套一层 seatbelt 沙箱;宿主进程已在沙箱内时该 `sandbox_apply` 被拒,插件服务握手失败,前端只能报「宏类型找不到」。
 - **Prevention:** 构建时临时关掉编译器的子进程沙箱即可:`xcodebuild ... OTHER_SWIFT_FLAGS="-Xfrontend -disable-sandbox" build`(命令行传入,别写进 pbxproj)。`swiftc -Xfrontend -disable-sandbox -typecheck` 可先做最小复现验证。
+
+## DEV-058: 多显示器下 Dock 悬停预览只在一块屏生效——Dock 的 AX 树只暴露一块屏的 Dock
+- **Pitfall:** 接了外接屏后,只有一块屏的 Dock 能弹预览,另一块屏怎么悬停都没反应(日志里连 `resolve` 都没有)。看起来像「副屏 Dock 的 AX 命中拿不到」,但真正的原因在触发阶段。
+- **Cause:** ① Dock 进程的 `kAXWindows` 恒为 0(实测),`dockBarFrameTL()` 永远是 nil;② Dock 应用元素的 `kAXChildren` 只有 **1 个 `AXList`**,里面是**一块屏**的图标(实测 14 项坐标全在主屏,指针移到另一块屏后这棵树不变——跟着主屏走,不跟指针走);`CGWindowList` 里 Dock 也只有 1 个窗口。③ 于是 `dockRegionTL()` 退化成「缓存项 bbox ± margin」,只覆盖那一块屏;另一块屏悬停时快路径不命中、又不在条带内 → `scheduleShow` 从不调度,流程在触发阶段就断了。④ 兜底 `isNearDockEdgeFallback` 只在条带为 nil 时可用,缓存有效时永远不可达,所以没有兜底。
+- **Prevention:** 触发/闸门改成**每块屏各一条 Dock 边缘带**(`dockBandZonesTL`):用 `NSScreen.frame − visibleFrame` 量 Dock 所在边与厚度(自动隐藏时为 0,用常量 96/110pt 兜底),横向跨度用缓存条带宽度 ×1.2 居中到各屏(各屏 Dock 内容一致、宽度相同);「在不在图标上」只由 AX 权威命中判定。同时把坐标翻转基准从 `union.maxY` 改成**主屏**(Cocoa 原点所在屏)的 `maxY`,否则外接屏摆到主屏上方时全局 y 会整体偏移一块屏高;`placement` 改按 Dock 朝向判断,不再用缓存 bbox 的横竖。
+- **验证:** `defaults write com.zeroflow.app dockPreviewDebug -bool true` 后重启,副屏悬停应出现 `resolve pt=... item=...` 并弹面板;若日志只有 `not dock item, chain=...`,说明该屏 Dock 展开后仍不在 AX 树里(需换数据源),chain 里会直接给出命中的元素角色。
+
+## DEV-059: Dock 贴左/右边时 AX 给的是退化坐标(16×0 挤在 (-10,0)),面板会飞到屏幕角落
+- **Pitfall:** 把 Dock 放到屏幕左侧/右侧后,悬停图标弹出的预览面板跑到屏幕左上角(甚至半截在屏外),而且卡片是横排的。看起来像「朝向判断错了」,其实是坐标本身就不可用。
+- **Cause:** Dock **自动隐藏 + 贴在侧边**时,`AXApplicationDockItem` 的 `kAXPositionAttribute`/`kAXSizeAttribute` 全是退化值——实测 14 个项一律 `(-10, 0)` + `16×0`(底部 Dock 隐藏时给的是「隐藏位」但尺寸有效,所以只有侧边中招)。于是 ① 缓存 bbox = `(-10,0,16,0)`,`width >= height*2` 恒成立 → 朝向被误判成 `.bottom` → 面板跑到图标**上方**且横排;② 命中项 frame 退化 → 面板锚点落在左上角,定位完全跑偏。
+- **Prevention:** ① 朝向改读 Dock 的全局偏好 `CFPreferencesCopyAppValue("orientation", "com.apple.dock")`(left/right/bottom),拿不到再退回 `frame − visibleFrame` 的 inset,最后才看缓存条带;② `isDegenerateDockFrame`(宽或高 < 8)把退化 frame 挡在所有几何计算之外:边缘带跨度退化时铺满整条边、`syncDockCache` 不拿它判「坐标过期」、`isDockSettled` 视为未落位(保留展开动画的重试预算);③ 锚点走 `sanitizedAnchor`:退化时按「指针 + 该屏 Dock 边缘带」重建(侧边:带宽 × 42 高、以指针 y 居中;底部:42 宽 × 带宽、贴底边),面板就能正常贴在图标旁边。
+- **验证:** 临时切 Dock 朝向(`defaults write com.apple.dock orientation -string left|right|bottom; killall Dock`)后看调试日志:`show ... placement=rightOf anchor=(0,699,110,42) panelTL=(112,547,...)` 表示左侧 Dock 面板落在图标右侧且竖向排列;`placement=leftOf` 对右侧 Dock 反之;底部仍是 `placement=above`。
+- **附带坑:** 净化锚点要在 `present` **取锁之前**算——`sanitizedAnchor → dockBandZonesTL → dockStripTL` 会再 `lock.lock()`,`NSLock` 不可重入,持锁调用会把主线程直接锁死(表现为面板永不出现、应用像卡住)。
+
+## DEV-060: Dock 预览「鼠标还没走到面板上就消失」——`insetBy` 符号写反，保活区其实是内缩的
+- **Pitfall:** 预览面板弹出后想把鼠标移到面板上点卡片，结果一动就消失，慢一点根本够不到；越快越容易成功。看起来像「收起延迟太短」，调大也治不彻底。
+- **Cause:** 保活判定写的是 `anchorFrame.insetBy(dx: keepAliveInset, dy: keepAliveInset)`——`insetBy` 的**正值是内缩**（外扩要传负值，同文件里 `resolvedItemGateSlack` 就是 `-slack`）。于是保活区比图标/面板各自**小** 6pt，而面板底边离图标顶边只有 2pt：图标上沿到面板下沿之间凭空多出一条 `6 + 2 + 6 = 14pt` 的死带。指针慢速穿过这条死带就会超过 200ms 宽限，面板当场收起。
+- **Prevention:** ① 外扩一律写 `insetBy(dx: -keepAliveInset, ...)`（`NotchHotspotController` 同款写法可对照）；② 除两个矩形各自外扩外，再判一次 `anchor ∪ panel` 的并集（并集天然包含两者之间的走廊），把「图标↔面板有缝」的情况一起兜住；③ `.visible` 时若指针命中「另一个图标」，先用「图标 → 面板」走廊（`isInTransitCorridor`：沿朝向轴从图标边缘延伸到面板边缘、横截面取图标跨度）挡一道——放大 Dock 下缓存几何会整体漂移，上行途中很容易误命中隔壁图标，一旦按「换目标」处理就会 `softHidePanel` 掉刚弹出的面板；④ 弹出/收起两个延时都做成设置页滑杆（`dockPreviewHoverDelayMs` / `dockPreviewHideDelayMs`，后者默认 500ms），每次调度时现读，改滑杆即时生效。
+- **验证:** `defaults write com.zeroflow.app dockPreviewDebug -bool true` 后慢速把指针从图标移到面板：日志不应出现 `hide (left icon+panel region)`；滑杆把「收起延迟」拉到 2000ms 后，离开图标再移回面板应能救回同一个面板。
+
+## DEV-061: 鼠标去面板途中蹭到隔壁图标 → 当前面板立刻被收掉（「换目标先 softHide」的代价）
+- **Pitfall:** 面板弹出后往面板上移，途中手一抖压到隔壁图标，当前面板当场消失，得重新悬停。越靠边的图标越容易中招（面板居中后两侧都是别的图标）。
+- **Cause:** `.visible` 里「命中另一个图标」的分支原本会 `softHidePanel()`（视觉上立刻 `orderOut`，状态留在 visible 等新目标重弹）。它存在的原因是**换目标时要避免旧内容残留**：新目标还要走 `hoverDelay` 才解析出窗口，这段空窗里若继续显示旧 app 的卡片，用户会以为点的是新 app 的窗口。但「蹭一下就走」和「真的停在隔壁」在缓存几何上看不出区别，于是路过也按换目标处理 → 面板秒收；而 300ms 后新目标在指针已经移到面板/空中时解析必然失败，`failResolve` 又把面板硬收一次，用户根本来不及。
+- **Prevention:** ① 换目标**不再**预先 softHide（函数已删）：旧面板留着，新目标到期由 `present` 复用同一面板原位换内容，解析失败见下条；② `failResolve` 增加「保面板」分支——面板开着且指针仍在 `isInKeepAliveRegion`（图标∪面板外扩 + 并集走廊）里时，只作废这次 show（`pendingShowGen = nil; showGen += 1; hideGen += 1`），面板与状态原样保留，去留交给保活/收起延迟；指针真的离开了才 `hidePanel`；③ `present` 成功后 `hideGen += 1`，作废「按旧锚点算出来」的宽限隐藏——否则指针停在隔壁图标不动时没有 move 事件来 bump，新面板会在 500ms 后被那条旧定时器收掉。
+- **验证:** 悬停图标 A 出面板 → 指针斜着蹭过隔壁图标 B 再移到面板上：面板应保持（日志出现 `keep panel, resolve miss (...)` 而不是 `hide (...)`）；停在 B 上不动 ≥300ms 才应该换成 B 的内容。
+
+## DEV-062: 副屏预览能弹出、但「移到隔壁图标」不换内容——换目标判定只走了缓存快路径
+- **Pitfall:** 主屏一切正常；副屏悬停图标能弹出缩略图，但指针移到旁边的图标上，面板内容不切换（主屏同操作会换）。看起来像「换目标逻辑坏了」，其实主屏根本没走到那段代码。
+- **Cause:** `.visible` 里「换到隔壁图标」靠 `cachedItem(at:)` 命中不同 id 来判定。而 Dock 的 AX 树只暴露**一块屏**的图标（DEV-058），副屏 Dock 的图标坐标压根不在 `dockItems` 里 → `hit` 恒为 nil → 换目标分支永远不进；于是指针离开当前图标后只剩「保活失败 → 宽限隐藏」一条路，表现为面板要么不换、要么过一会儿自己收掉。触发/解析本身没问题：`resolveTarget` 走的是 `AXUIElementCopyElementAtPosition` 系统级命中测试，对任意屏都有效。
+- **Prevention:** `.visible` 里补一条「缓存没覆盖」的换目标通道——指针不在保活区、但仍在 Dock 边缘带（`isNearDockStrip`，带是每屏各一条）里时，按 `hoverDelay` 重新走一次 AX 权威命中：命中同一图标内容不变，命中隔壁则 `present` 原位换内容。同时因为 `scheduleShow` 会置 `pendingShowGen`，宽限隐藏不会在这段窗口里把面板收掉。
+- **验证:** `defaults write com.zeroflow.app dockPreviewDebug -bool true` 后在副屏从一个图标平移到隔壁，日志应出现第二条 `resolve pt=... item=...` 且 `show ... placement=... anchor=...` 的 anchor 变成新图标；主屏行为不变（走缓存快路径，没有额外 resolve）。
+
+## DEV-063: 副屏「换隔壁图标」彻底修好——把缓存布局跨屏投影，别指望 AX 覆盖所有屏
+- **Pitfall:** DEV-062 给副屏补了「按延时重走 AX 权威命中」的换目标通道，但实测仍不换内容。日志里能看到副屏 Dock 的图标坐标根本不在缓存里（`strip` 落在另一块屏），`hit` 恒为 nil；而 AX 命中在副屏上也不一定给出图标项（Dock 的 AX 树只暴露一块屏，见 DEV-058）。
+- **Cause:** 换目标、右键抑制、`hoverItemID` 全部建立在 `cachedItem(at:)` 上，而这个缓存只有一块屏的坐标；副屏唯一能用的 AX 权威命中又不可靠。等于副屏没有任何「这是哪个图标」的信息来源。
+- **Prevention:** 在 `cachedItem(at:)` 里做**跨屏投影**——各屏 Dock 内容/尺寸完全一致、底部 Dock 各自居中、侧边 Dock 各自贴边，所以把整条缓存布局按「屏幕中心/屏幕边」平移到指针所在屏即可命中：底部 `dx = to.midX − from.midX, dy = to.maxY − strip.maxY`（`strip.maxY` 取缓存条带下沿，缓存处于自动隐藏的「隐藏位」时同样成立），侧边同理按 `minX/maxX` 对齐。投影后 `cachedItem` 一并返回**投影后的 frame**，`resolveAndShow` 的兜底与锚点都用它，面板才贴在副屏图标上。同时把 `ResolveOutcome` 拆出 `menuElement`，让 `notDockElement` 也能走缓存兜底（右键菜单仍不兜底）。
+- **附带坑:** `cachedItem` 持锁期间**不能**调 `dockEdge()`——它的兜底分支会调 `dockStripTL()` 再取锁，`NSLock` 不可重入会死锁；改用纯读的 `Self.dockOrientationRaw()`（只读 `com.apple.dock orientation`）。
+
+## DEV-064: 换图标偶发失败的真凶——放大动画期间 AX 命中抖动，一次失败就判「不在图标上」
+- **Pitfall:** 副屏（或任何屏）沿 Dock 平移换图标时**时好时坏**：同一手势有时能换、有时面板直接收起；换个速度又好了。日志里同一个坐标相隔 170ms 两次解析结果完全不同。
+- **Cause:** ① Dock 开了放大（magnification）时图标在平移，`AXUIElementCopyElementAtPosition` 在动画中途有时只返回通用的 `AXDockItem` 角色（不是 `AXApplicationDockItem`），`isDockItemElement` 判 false → `resolveTarget` 返回 `notDockElement`；② `scheduleResolveRetry` 当时要求「Dock 尚未落位」才重试，而放大动画期间条带是**已落位**的 → 不重试 → `failResolve` 直接 `hidePanel`；③ 缓存快路径同时因为条带是动画中途快照（实测 bbox 在 588/626/661/689 之间反复变化）而漏命中。三者叠加 = 「一次抖动就收面板」。
+- **Prevention:** ① `scheduleResolveRetry` 的门槛从「`isNearDockStrip && !isDockSettled`」放宽为「`isNearDockStrip`」——指针还在 Dock 边带里就说明这次失败是时序竞态，重试预算（0.12s × 10 ≈ 1.2s）内旧面板保持不动，预算用完才真收；② 权威命中同时接受通用角色 `AXDockItem`（`isAnyDockItemElement`，只用于命中、不参与缓存收集，避免分隔符/堆栈污染条带 bbox）；③ 解析日志加 `settled=` 便于区分「隐藏位」与「放大动画」两类竞态。
+- **排查提示:** `DockHoverPreview: started (rev=...)` 会打印代码版本标记——怀疑「改了代码但跑的还是旧二进制」时先看这条；另外 `open` 一个已在运行的 app 只会激活旧进程，**必须**先 `pkill -f "Zeroflow.app/Contents/MacOS/Zeroflow"` 再 `open`。

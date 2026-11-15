@@ -464,6 +464,21 @@
     "en": "How long the mouse must stay on a Dock icon before the preview appears.",
     "ja": "マウスがDockアイコン上に留まってからプレビューが表示されるまでの時間。"
   },
+  "弹出延迟": {
+    "zh-Hans": "弹出延迟",
+    "en": "Show delay",
+    "ja": "表示遅延"
+  },
+  "收起延迟": {
+    "zh-Hans": "收起延迟",
+    "en": "Hide delay",
+    "ja": "非表示遅延"
+  },
+  "弹出延迟：鼠标停留在 Dock 图标上多久后弹出预览。收起延迟：鼠标离开图标与面板后多久收起——调大可让鼠标从容地从图标移到预览面板上。": {
+    "zh-Hans": "弹出延迟：鼠标停留在 Dock 图标上多久后弹出预览。收起延迟：鼠标离开图标与面板后多久收起——调大可让鼠标从容地从图标移到预览面板上。",
+    "en": "Show delay: how long the mouse must rest on a Dock icon before the preview appears. Hide delay: how long the panel waits after the pointer leaves the icon and panel — increase it to give yourself time to move from the icon onto the preview.",
+    "ja": "表示遅延：マウスがDockアイコン上に留まってからプレビューが表示されるまでの時間。非表示遅延：マウスがアイコンとパネルから離れてから閉じるまでの時間。大きくすると、アイコンからプレビューへゆっくり移動できます。"
+  },
   "需要「辅助功能」权限才能监测 Dock 悬停": {
     "zh-Hans": "需要「辅助功能」权限才能监测 Dock 悬停",
     "en": "Accessibility permission is required to detect Dock hovering",

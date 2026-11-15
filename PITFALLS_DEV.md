@@ -280,3 +280,13 @@
 - **Pitfall:** 剪贴板面板最多只显示 10 行,但历史里每条图片记录都在开面板瞬间被解码一次(每行 `thumbnail(for:)` 都在 `body` 里同步调用),历史里图片一多就是成百次解码,首帧明显卡顿,内存也被顶上去。
 - **Cause:** `ScrollView { VStack { ForEach ... } }` 不是懒加载容器,`VStack` 的子视图会全部实例化并参与布局,`body` 里的解码调用自然全跑一遍。
 - **Prevention:** 列表容器一律用 `LazyVStack`;行内的图片读取要保证是「小文件快路径」(见 DEV-054),否则懒加载也挡不住滚动时的同步解码。
+
+## DEV-056: 剪贴板面板弹出后默认选中的首条不会展开预览
+- **Pitfall:** 热键弹出面板后默认高亮第一条,但鼠标不动、也不按 ↑↓ 时,等再久右侧预览都不会出来;必须先按一下 ↓ 或悬停到别的行才「突然好了」。日志里只有 `clipboard panel shown` 与首帧 `preview=false`,没有任何后续 `preview=true` 帧。
+- **Cause:** 预览的停留计时(`schedulePreview()`)只由 `hover(_:)`(且 `index != selectedIndex`)和 `moveSelection(by:)` 触发,`show()` 从不为自己选中的首条起计时;另有两个反向因素:① 视图挂载时 `TextField` 会把空查询原样回写一次,`$query` 的 sink 误判成「用户搜索」,`handleQueryChange()` 直接把刚起的计时取消;② 历史是后台加载的(DEV-051),冷启动弹出时 `items` 还是空,`selectedItem == nil` 也起不了计时。
+- **Prevention:** 三处补齐——`show()` 在 `makeKeyAndOrderFront` 之后调一次 `schedulePreview()`;`ClipboardHistoryStore.$items` 的 sink 在 `previewItem == nil` 时补一次(应对异步加载);`$query` 的 sink 先与上次生效值比对,值没变就忽略(滤掉挂载时的空回写),真正改词才取消计时并收起预览。`hover` 命中已选中行时也要能起计时(否则悬停首行同样没反应),但已有 `pendingPreview` 就不要重置倒计时。核对方式:`ZEROFLOW_CLIPBOARD_DEBUG=1` 启动,日志应出现 `frame ... preview=true`,且**没有** `hover row` / 键盘事件。
+
+## DEV-057: agent 会话里 `xcodebuild` 报 `SwiftUIMacros ... produced malformed response`
+- **Pitfall:** 在受限沙箱(自动化/agent 进程)里构建时,凡是带 `@State`/`@Published` 的文件全部编译失败:`external macro implementation type 'SwiftUIMacros.StateMacro' could not be found for macro 'State()'; .../swift-plugin-server produced malformed response`,同时 stderr 有一行 `sandbox-exec: sandbox_apply: Operation not permitted`。看起来像工程/SDK 问题,实际与代码无关(新建最小 `@State` 用例同样失败)。
+- **Cause:** 宏展开由独立进程 `swift-plugin-server` 完成,它启动时会给自己套一层 seatbelt 沙箱;宿主进程已在沙箱内时该 `sandbox_apply` 被拒,插件服务握手失败,前端只能报「宏类型找不到」。
+- **Prevention:** 构建时临时关掉编译器的子进程沙箱即可:`xcodebuild ... OTHER_SWIFT_FLAGS="-Xfrontend -disable-sandbox" build`(命令行传入,别写进 pbxproj)。`swiftc -Xfrontend -disable-sandbox -typecheck` 可先做最小复现验证。

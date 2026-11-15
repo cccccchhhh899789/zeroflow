@@ -45,6 +45,8 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
     private var keyMonitor: Any?
     private var pendingPreview: DispatchWorkItem?
     private var isDismissing = false
+    /// 上一次真正生效的搜索词，用来滤掉视图挂载时的空回写
+    private var lastQuery = ""
 
     /// 面板左上角锚点（Cocoa 全局坐标）：列表列固定贴在这里，展开预览时窗口只向一侧长
     private var anchorTopY: CGFloat = 0
@@ -125,6 +127,8 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
             panel.makeKeyAndOrderFront(nil)
             didActivateApp = true
         }
+        // 弹出即选中第一条：也要为它起停留计时，否则只有 ↑↓ 或悬停到别的行才会展开预览
+        schedulePreview()
         ZSLog("clipboard panel shown, items=\(model.items.count), key=\(panel.isKeyWindow)")
     }
 
@@ -159,9 +163,16 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
     private func observe(_ model: ClipboardViewModel) {
         cancellables.removeAll()
+        lastQuery = model.query
         model.$query
             .dropFirst()
-            .sink { [weak self] _ in self?.handleQueryChange() }
+            .sink { [weak self] query in
+                // 面板挂载时 TextField 会把空查询原样回写一次：值没变就不是用户输入，
+                // 不能打断弹出时为首条起的预览计时
+                guard let self, query != self.lastQuery else { return }
+                self.lastQuery = query
+                self.handleQueryChange()
+            }
             .store(in: &cancellables)
         // 历史在后台加载：面板若先弹出（items 还是空），加载完成后补进模型
         ClipboardHistoryStore.shared.$items
@@ -176,6 +187,8 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
                     model.previewItem = nil
                 }
                 if wasEmpty { self.applyFrame(animated: false) }
+                // 历史是后台加载的：弹出时还没有条目就补一次首条预览计时
+                if model.previewItem == nil, model.query.isEmpty { self.schedulePreview() }
             }
             .store(in: &cancellables)
     }
@@ -196,7 +209,12 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
     }
 
     private func hover(_ index: Int) {
-        guard let model, index != model.selectedIndex else { return }
+        guard let model else { return }
+        guard index != model.selectedIndex else {
+            // 悬停在「已选中但还没展开」的行（如刚弹出时的第一条）同样要起计时
+            if model.previewItem == nil, pendingPreview == nil { schedulePreview() }
+            return
+        }
         ZSLog("clipboard: hover row \(index)")
         model.selectionFromPointer = true
         model.selectedIndex = index

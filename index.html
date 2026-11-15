@@ -108,7 +108,13 @@
   .btn-ghost{border:1px solid var(--line-strong);color:var(--text);background:rgba(255,255,255,.02)}
   .btn-ghost:hover{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.24)}
   .btn svg{width:16px;height:16px}
-  .meta-line{margin-top:22px;font-size:12.5px;color:var(--muted-dim);letter-spacing:.01em}
+  .dl-note{
+    min-height:17px;margin-top:14px;
+    font-size:12px;color:var(--muted-dim);
+    font-variant-numeric:tabular-nums;letter-spacing:.01em;
+  }
+  .meta-line{margin-top:10px;font-size:12.5px;color:var(--muted-dim);letter-spacing:.01em}
+
 
   /* ---------- sections ---------- */
   section{padding:0 0 84px}
@@ -251,7 +257,7 @@
       <p class="tagline" data-i18n="hero.tagline">七种 macOS 效率工具，一个菜单栏图标</p>
       <p class="sub" data-i18n="hero.sub">截图标注、窗口切换、Dock 增强、剪贴板历史、灵动岛。原生 Swift 编写，零第三方依赖，常驻内存极低。</p>
       <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/hellolio/zeroflow/releases/latest" target="_blank" rel="noopener">
+        <a class="btn btn-primary" id="dl" href="https://github.com/hellolio/zeroflow/releases/latest">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/>
           </svg>
@@ -264,6 +270,7 @@
           <span>GitHub</span>
         </a>
       </div>
+      <p class="dl-note" id="dlNote"></p>
       <p class="meta-line" data-i18n="hero.meta">macOS 14.0 Sonoma 及以上 · MIT 开源 · 免费无广告</p>
     </div>
   </section>
@@ -608,6 +615,34 @@
       }
     });
   }
+
+  // 解析最新 Release 的 DMG 直链：点击按钮即在本页直接下载，不跳转 Release 页
+  (function resolveDownload() {
+    var dl = document.getElementById("dl");
+    var note = document.getElementById("dlNote");
+    if (!dl || !window.fetch) return;
+    var FALLBACK = "https://github.com/hellolio/zeroflow/releases/latest";
+    fetch("https://api.github.com/repos/hellolio/zeroflow/releases/latest", {
+      headers: { Accept: "application/vnd.github+json" }
+    }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }).then(function (rel) {
+      var dmg = (rel.assets || []).filter(function (a) {
+        return /\.dmg$/i.test(a.name);
+      })[0];
+      if (!dmg) throw new Error("no dmg asset");
+      dl.href = dmg.browser_download_url;
+      dl.setAttribute("download", dmg.name);
+      if (note) {
+        var ver = String(rel.tag_name || "").replace(/^v/i, "");
+        var mb = (dmg.size / 1048576).toFixed(1);
+        note.textContent = (ver ? "v" + ver + " · " : "") + mb + " MB";
+      }
+    }).catch(function () {
+      dl.href = FALLBACK; // API 不可用（限流 / 离线）时回到 Releases 页
+    });
+  })();
 
   document.getElementById("year").textContent = new Date().getFullYear();
   apply(guess());

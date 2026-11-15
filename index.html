@@ -187,6 +187,13 @@
     background:var(--accent-soft);border:1px solid rgba(76,141,255,.25);
   }
   .steps li small{display:block;margin-top:4px;color:var(--muted);font-size:13px;line-height:1.6}
+  .inline-link{
+    color:var(--accent);text-decoration:none;
+    border-bottom:1px solid rgba(76,141,255,.5);
+    padding-bottom:.5px;
+    transition:color .18s,border-color .18s;
+  }
+  .inline-link:hover{color:#7FAEFF;border-color:#7FAEFF}
 
   .code{
     display:flex;align-items:center;gap:12px;
@@ -429,7 +436,7 @@
       </div>
       <ol class="steps">
         <li>
-          <span data-i18n="install.s1">从 Releases 下载最新的 DMG</span>
+          <span data-i18n="install.s1">从 <a class="inline-link" href="https://github.com/hellolio/zeroflow/releases/latest" target="_blank" rel="noopener">Releases</a> 下载最新的 DMG</span>
           <small data-i18n="install.s1s">Zeroflow-x.x.x.dmg，约几 MB。</small>
         </li>
         <li>
@@ -488,7 +495,7 @@
       "light.body": "与 AltTab、Maccy 相比，Zeroflow 的功能数倍于两者，常驻内存却远低于它们——无论是刚启动，还是长时间大量使用之后。",
       "light.c1": "零第三方依赖", "light.c2": "单 Xcode 工程", "light.c3": "SwiftUI + AppKit", "light.c4": "安装包小 · 启动快",
       "install.title": "安装",
-      "install.s1": "从 Releases 下载最新的 DMG",
+      "install.s1": "从 {link} 下载最新的 DMG",
       "install.s1s": "Zeroflow-x.x.x.dmg，约几 MB。",
       "install.s2": "把 Zeroflow 拖入「应用程序」",
       "install.s3": "首次启动若被 Gatekeeper 拦截，执行下方命令后重新打开",
@@ -519,7 +526,7 @@
       "light.body": "Compared to AltTab and Maccy, Zeroflow offers several times more functionality while using significantly less memory — right after launch and after extended use alike.",
       "light.c1": "Zero dependencies", "light.c2": "Single Xcode project", "light.c3": "SwiftUI + AppKit", "light.c4": "Small download, fast launch",
       "install.title": "Install",
-      "install.s1": "Download the latest DMG from Releases",
+      "install.s1": "Download the latest DMG from {link}",
       "install.s1s": "Zeroflow-x.x.x.dmg — only a few MB.",
       "install.s2": "Drag Zeroflow into Applications",
       "install.s3": "If Gatekeeper blocks the first launch, run the command below and open it again",
@@ -550,7 +557,7 @@
       "light.body": "AltTab や Maccy と比べて、Zeroflow は機能が数倍ありながら常駐メモリは大幅に少ない。起動直後でも、長時間の使用後でも変わりません。",
       "light.c1": "サードパーティ依存ゼロ", "light.c2": "単一 Xcode プロジェクト", "light.c3": "SwiftUI + AppKit", "light.c4": "軽い配布物・高速起動",
       "install.title": "インストール",
-      "install.s1": "Releases から最新の DMG をダウンロード",
+      "install.s1": "{link} から最新の DMG をダウンロード",
       "install.s1s": "Zeroflow-x.x.x.dmg、数 MB 程度。",
       "install.s2": "Zeroflow を「アプリケーション」へドラッグ",
       "install.s3": "初回起動時に Gatekeeper にブロックされたら、以下のコマンドを実行して再度開く",
@@ -561,17 +568,39 @@
   };
 
   var HTML_LANG = { zh: "zh-CN", en: "en", ja: "ja" };
+  var RELEASES_URL = "https://github.com/hellolio/zeroflow/releases/latest";
   var nodes = document.querySelectorAll("[data-i18n]");
   var buttons = document.querySelectorAll(".lang button");
   var copyBtn = document.getElementById("copy");
   var current = "zh";
+
+  // 文案里的 {link} 占位符渲染成指向 Releases 的外链（新标签页打开）
+  function renderValue(el, text) {
+    if (text.indexOf("{link}") === -1) {
+      el.textContent = text;
+      return;
+    }
+    el.textContent = "";
+    text.split("{link}").forEach(function (part, i) {
+      if (i > 0) {
+        var a = document.createElement("a");
+        a.href = RELEASES_URL;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.className = "inline-link";
+        a.textContent = "Releases";
+        el.appendChild(a);
+      }
+      if (part) el.appendChild(document.createTextNode(part));
+    });
+  }
 
   function apply(lang) {
     var dict = I18N[lang] || I18N.zh;
     current = I18N[lang] ? lang : "zh";
     nodes.forEach(function (el) {
       var val = dict[el.getAttribute("data-i18n")];
-      if (val) el.textContent = val;
+      if (val) renderValue(el, val);
     });
     document.documentElement.lang = HTML_LANG[current];
     document.title = dict["title"];
@@ -621,7 +650,7 @@
     var dl = document.getElementById("dl");
     var note = document.getElementById("dlNote");
     if (!dl || !window.fetch) return;
-    var FALLBACK = "https://github.com/hellolio/zeroflow/releases/latest";
+    var FALLBACK = RELEASES_URL;
     fetch("https://api.github.com/repos/hellolio/zeroflow/releases/latest", {
       headers: { Accept: "application/vnd.github+json" }
     }).then(function (r) {

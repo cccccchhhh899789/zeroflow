@@ -41,7 +41,7 @@ xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow -configuration Release -
 | `ZEROFLOW_AUTO_FOCUS=<wid>` | 启动 2s 后用 WindowActivator 聚焦指定窗口 |
 | `ZEROFLOW_DOCK_PROBE=1` | 启动 1s 后 dump Dock 的 AX 布局到日志 |
 | `ZEROFLOW_SWITCHER_DEBUG=1` | 启动 1s 后 dump 窗口列表 + ⌘⇥ tap 安装状态,并输出事件级日志 |
-| `ZEROFLOW_DOCKPREVIEW_DEBUG=1` | 打印 Dock 悬停预览的命中/展示/隐藏决策日志 |
+| `ZEROFLOW_DOCKPREVIEW_DEBUG=1` | 打印 Dock 悬停预览的命中/展示/隐藏决策日志(也可 `defaults write com.zeroflow.app dockPreviewDebug -bool true` 打开,便于 `open` 启动时免环境变量) |
 | `ZEROFLOW_NOTCH_DEBUG=1` | 打印灵动岛刘海探测/弹出/收起决策日志 |
 | `ZEROFLOW_NOTCH_FAKE=1` | 在主屏合成伪刘海(宽 180/高 24),便于无刘海机器调试面板 |
 | `ZEROFLOW_NOTCH_SHOW=1` | 启动 1.5s 后直接弹出灵动岛面板(绕过悬停;此模式指针移出不会自动收起,便于反复看动画) |
@@ -119,7 +119,7 @@ SwiftUI 视图 + AppKit/CG/AX(含私有 API dlsym 桥)服务层 + UserDefaults/A
 | `CGSWindowServer.swift` | SkyLight/CGS 私有 API dlsym 桥:SLS 批量枚举、Space 拓扑、跨 Space 激活 |
 | `CommandTabSwitcher.swift` | ⌘⇥ 切换器:CGEventTap 拦截 + 会话键盘(⇥/⇧⇥/方向键)+ 悬停卡片操作 |
 | `DockClickMinimizer.swift` | Dock 单击最小化:CGEventTap + Dock AX 命中 |
-| `DockHoverPreviewController.swift` | Dock 悬停预览:listen-only CGEventTap + idle→pending→visible 状态机(generation 作废) |
+| `DockHoverPreviewController.swift` | Dock 悬停预览:listen-only CGEventTap + idle→pending→visible 状态机(generation 作废);触发/闸门用「每块屏各一条 Dock 边缘带」(Dock 的 AX 树只暴露一块屏的图标,见 DEV-058);朝向读 Dock 偏好、侧边 Dock 的退化 AX 坐标见 DEV-059 |
 | `FinderCommandRunner.swift` | 代执行扩展转交的自定义命令:请求文件 + 分布式通知 IPC,启动消化积压(>30s 丢弃) |
 | `FinderSyncReloader.swift` | 陈旧扩展自愈:pluginkit ignore→use election 循环重载(Sequoia/Tahoe bug) |
 | `GlobalHotkeyManager.swift` | Carbon 全局热键注册/注销(截图 + 剪贴板两路,事件按 HotKeyID 分发),分别受 `screenshotEnabled` / `clipboardEnabled` 控制 |

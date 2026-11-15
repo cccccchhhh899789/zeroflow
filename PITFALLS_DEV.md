@@ -269,3 +269,14 @@
 - **Pitfall:** 编辑页里画的框/线/气泡/马赛克,保存或复制出来的 PNG 里位置不对——整体像是「错位」:在图片中间偏上加的框,导出后跑到中间偏下(实测 2560×1440 截图,画布拖拽得到图像坐标 y=333.8..473.5,导出后落在 y=242..390.5,即关于水平中线的镜像)。底图本身是正的,只有标注层被翻。
 - **Cause:** 元素一律存「图像坐标:原点左上、y 向下」(与 SwiftUI 画布一致),但 `exportedImage` 用的是 `NSGraphicsContext(bitmapImageRep:)`,位图上下文原生是「左下原点、y 向上」且 `isFlipped == false`;`NSBezierPath(rect:)`/`move(to:)` 直接吃图像坐标就被按 y 向上解释,整层上下镜像。只居中对称的元素(正好在垂直正中、横跨全高的框)看不出问题,所以很容易误判成「位置漂移」。
 - **Prevention:** 导出时把 CTM 整体翻成 y 向下,并给上下文打上 flipped 标记:`let cg = bitmap.cgContext; let ctx = NSGraphicsContext(cgContext: cg, flipped: true)`,`cg.scaleBy(pixelScale)` 后再 `cg.translateBy(x: 0, y: image.size.height)` + `cg.scaleBy(x: 1, y: -1)`。翻转后 `NSBezierPath` 的几何坐标可直接用图像坐标,`NSAttributedString.draw(in:)` 仍正向且顶部对齐;但**图片必须显式 `respectFlipped: true`**(`image.draw(in:from:operation:fraction:respectFlipped:hints:)`),否则底图和马赛克叠加图会被画反——`drawMosaicIntoCanvas` 里的 `overlay.draw(...)` 同样要加。收尾用 `cg.flush()`(`flushGraphics()` 走的是原 rep 上下文)。核对方式:造一张「顶部一条红带」的底图 + 左上角一个框,导出后从最终 PNG 解码回来按行打印 ASCII 色块,别只盯着预览。
+
+## DEV-054: `CGImageSourceCreateThumbnailAtIndex` 出大尺寸会永久留下脏页,不能当「预览图按需重算」用
+- **Pitfall:** 为了「关掉剪贴板面板就把内存还回去」,把预览缓存改成每次打开面板都重新从原图解码,结果内存反而越用越高:开关面板 + 展开预览 20 次,footprint 从 31MB 一路涨到 79MB,每轮稳定 +2.9MB,malloc 却几乎不动(说明不是我们的堆对象)。同一张 2940×1912 的 PNG 连解 30 次 +93MB,无上限、不回收。
+- **Cause:** `CGImageSourceCreateThumbnailAtIndex(..., kCGImageSourceThumbnailMaxPixelSize: 1024)` 每次调用都会在进程里留下约「输出尺寸」量级的脏页(CG/ImageIO 侧的 VM),即使 CGImage 引用早已释放、`autoreleasepool` 也已清空。实测隔离进程 30 轮:`thumbnail→1024` +93MB、`thumbnail→512` +5.6MB/8 轮、`thumbnail→96` +6MB(每轮 0.2MB)。**同一张图重复解码不会复用,是按调用次数累加的。**
+- **Prevention:** ① 显示路径不要碰原图:`clipboard-images/derived/<id>.thumb.jpg`(≤96px)与 `<id>.preview.jpg`(≤1024px)落盘,列表/预览只读这两种小文件(读 1024px JPEG 30 次只 +0.1MB);② 需要从大图生成派生图时,用 `CGImageSourceCreateImageAtIndex` 全解码 + `CGContext.draw` 按长边缩放重绘(30 次仅 +3.3MB,比 thumbnail API 省 28 倍),再 `CGImageDestination` 写 JPEG;③ JPEG 无 alpha,重绘前先铺白底,否则透明 PNG 变黑块;④ 内存缓存只为「面板打开期间」服务(缩略图 3MB、预览 `countLimit = 1`),`dismiss()` 里 `purgeMemoryCaches()` 整体清空。
+- **验证:** `ZEROFLOW_MEM_CYCLE=clipboard:20`(压测里每次都会展开预览)应稳定在 ~26MB 且每轮零增长;改前同条件是 46MB 并持续上涨。
+
+## DEV-055: `ScrollView` + `VStack` 会把所有行一次性建出来,缩略图跟着全量解码
+- **Pitfall:** 剪贴板面板最多只显示 10 行,但历史里每条图片记录都在开面板瞬间被解码一次(每行 `thumbnail(for:)` 都在 `body` 里同步调用),历史里图片一多就是成百次解码,首帧明显卡顿,内存也被顶上去。
+- **Cause:** `ScrollView { VStack { ForEach ... } }` 不是懒加载容器,`VStack` 的子视图会全部实例化并参与布局,`body` 里的解码调用自然全跑一遍。
+- **Prevention:** 列表容器一律用 `LazyVStack`;行内的图片读取要保证是「小文件快路径」(见 DEV-054),否则懒加载也挡不住滚动时的同步解码。

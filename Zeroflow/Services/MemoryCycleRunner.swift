@@ -85,7 +85,8 @@ enum MemoryCycleRunner {
         case .notch:
             NotchHotspotController.shared.debugCyclePresent()
         case .clipboard:
-            ClipboardPanelController.shared.showForDebug()
+            // 顺带展开预览：预览解码才是这条链的内存大头（DEV-054），只开关面板测不出来
+            ClipboardPanelController.shared.showForDebug(expandAfter: 0.35)
         case .switcher:
             CommandTabSwitcher.shared.debugCycleBegin()
         case .editor:

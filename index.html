@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zeroflow — 七种 macOS 效率工具，一个菜单栏图标</title>
+<meta name="description" content="Zeroflow 是原生 Swift 编写的 macOS 效率工具集：截图标注、窗口切换、Dock 增强、剪贴板历史、灵动岛。免费、无广告、零第三方依赖。">
+<meta name="theme-color" content="#07080A">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Zeroflow">
+<meta property="og:description" content="Seven macOS utilities behind one menu bar icon. Native Swift, zero dependencies.">
+<meta property="og:image" content="assets/icon.png">
+<link rel="icon" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/icon.png">
+<style>
+  :root{
+    --bg:#07080A;
+    --bg-elev:#0D0F12;
+    --bg-code:#0A0C0F;
+    --line:rgba(255,255,255,.08);
+    --line-strong:rgba(255,255,255,.14);
+    --text:#F3F5F7;
+    --muted:#98A2B0;
+    --muted-dim:#6B7480;
+    --accent:#4C8DFF;
+    --accent-soft:rgba(76,141,255,.14);
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",
+      "PingFang SC","Hiragino Sans","Noto Sans CJK SC",sans-serif;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+  }
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:960px;margin:0 auto;padding:0 24px}
+
+  /* ---------- nav ---------- */
+  .nav{
+    position:sticky;top:0;z-index:20;
+    background:rgba(7,8,10,.72);
+    backdrop-filter:saturate(180%) blur(18px);
+    -webkit-backdrop-filter:saturate(180%) blur(18px);
+    border-bottom:1px solid var(--line);
+  }
+  .nav-inner{display:flex;align-items:center;gap:20px;height:56px}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:14px;letter-spacing:-.01em}
+  .brand img{width:20px;height:20px;border-radius:5px}
+  .nav-links{display:flex;gap:22px;margin-left:auto;font-size:13.5px;color:var(--muted)}
+  .nav-links a{transition:color .18s}
+  .nav-links a:hover{color:var(--text)}
+  .lang{display:flex;gap:2px;padding:3px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.02)}
+  .lang button{
+    font:inherit;font-size:11.5px;letter-spacing:.02em;
+    color:var(--muted-dim);background:none;border:0;cursor:pointer;
+    padding:3px 8px;border-radius:5px;transition:all .18s;
+  }
+  .lang button:hover{color:var(--muted)}
+  .lang button[aria-pressed="true"]{color:var(--accent);background:var(--accent-soft)}
+
+  /* ---------- hero ---------- */
+  .hero{
+    position:relative;text-align:center;
+    padding:96px 0 88px;
+    overflow:hidden;
+  }
+  .hero::before{
+    content:"";position:absolute;inset:-40% 0 auto 0;height:660px;
+    background:radial-gradient(ellipse 60% 50% at 50% 0%,rgba(76,141,255,.20),transparent 70%);
+    pointer-events:none;
+  }
+  .hero .wrap{position:relative}
+  .app-icon{
+    width:108px;height:108px;border-radius:25px;
+    box-shadow:0 24px 60px -18px rgba(0,0,0,.9),0 0 0 1px rgba(255,255,255,.07);
+  }
+  h1{
+    font-size:clamp(2.5rem,6vw,3.9rem);
+    font-weight:680;letter-spacing:-.035em;line-height:1.05;
+    margin-top:28px;
+  }
+  .tagline{
+    margin-top:18px;font-size:clamp(1.02rem,2.2vw,1.3rem);
+    color:var(--text);font-weight:500;letter-spacing:-.015em;
+  }
+  .sub{
+    margin:14px auto 0;max-width:620px;
+    color:var(--muted);font-size:15px;line-height:1.7;
+  }
+  .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:36px}
+  .btn{
+    display:inline-flex;align-items:center;gap:8px;
+    height:44px;padding:0 22px;border-radius:10px;
+    font-size:14px;font-weight:560;letter-spacing:-.01em;
+    transition:transform .18s,background .18s,border-color .18s,box-shadow .18s;
+  }
+  .btn:active{transform:scale(.985)}
+  .btn-primary{
+    background:var(--accent);color:#04070D;
+    box-shadow:0 10px 30px -12px rgba(76,141,255,.85);
+  }
+  .btn-primary:hover{background:#6BA0FF;box-shadow:0 12px 34px -10px rgba(76,141,255,.95)}
+  .btn-ghost{border:1px solid var(--line-strong);color:var(--text);background:rgba(255,255,255,.02)}
+  .btn-ghost:hover{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.24)}
+  .btn svg{width:16px;height:16px}
+  .meta-line{margin-top:22px;font-size:12.5px;color:var(--muted-dim);letter-spacing:.01em}
+
+  /* ---------- sections ---------- */
+  section{padding:0 0 84px}
+  .sec-head{margin-bottom:30px}
+  h2{
+    font-size:clamp(1.45rem,3.4vw,1.9rem);
+    font-weight:640;letter-spacing:-.028em;
+  }
+  .sec-lead{margin-top:9px;color:var(--muted);font-size:14.5px;max-width:640px}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(268px,1fr));gap:14px}
+  .card{
+    background:var(--bg-elev);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:20px 20px 22px;
+    transition:border-color .2s,background .2s,transform .2s;
+  }
+  .card:hover{border-color:rgba(76,141,255,.42);background:#101319;transform:translateY(-2px)}
+  .card-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .ic{
+    display:grid;place-items:center;width:34px;height:34px;
+    border-radius:9px;background:rgba(76,141,255,.10);color:var(--accent);
+  }
+  .ic svg{width:18px;height:18px}
+  kbd,.chip{
+    font-family:ui-monospace,"SF Mono",Menlo,monospace;
+    font-size:11px;color:var(--muted);
+    padding:3px 7px;border-radius:6px;
+    border:1px solid var(--line);background:rgba(255,255,255,.035);
+    white-space:nowrap;
+  }
+  .card h3{font-size:14.5px;font-weight:600;letter-spacing:-.012em}
+  .card p{margin-top:7px;font-size:13px;line-height:1.65;color:var(--muted)}
+
+  /* ---------- light section ---------- */
+  .light{
+    border:1px solid var(--line);border-radius:18px;
+    padding:36px 32px;
+    background:
+      radial-gradient(ellipse 70% 120% at 12% 0%,rgba(76,141,255,.10),transparent 60%),
+      var(--bg-elev);
+  }
+  .light h2{font-size:clamp(1.3rem,3vw,1.65rem)}
+  .light p{margin-top:12px;color:var(--muted);font-size:14px;line-height:1.75;max-width:680px}
+  .compare{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
+  .compare span{
+    font-size:12px;color:var(--muted);
+    border:1px solid var(--line);border-radius:999px;padding:5px 12px;
+    background:rgba(255,255,255,.02);
+  }
+
+  /* ---------- install ---------- */
+  .steps{list-style:none;counter-reset:s;display:grid;gap:2px;margin-top:6px}
+  .steps li{
+    counter-increment:s;position:relative;
+    padding:16px 0 16px 46px;border-bottom:1px solid var(--line);
+    font-size:14.5px;color:var(--text);
+  }
+  .steps li:last-child{border-bottom:0}
+  .steps li::before{
+    content:counter(s);
+    position:absolute;left:0;top:15px;
+    width:26px;height:26px;border-radius:8px;
+    display:grid;place-items:center;
+    font-size:12px;font-weight:600;color:var(--accent);
+    background:var(--accent-soft);border:1px solid rgba(76,141,255,.25);
+  }
+  .steps li small{display:block;margin-top:4px;color:var(--muted);font-size:13px;line-height:1.6}
+
+  .code{
+    display:flex;align-items:center;gap:12px;
+    margin-top:6px;padding:12px 14px;
+    background:var(--bg-code);
+    border:1px solid var(--line);border-radius:10px;
+    font-family:ui-monospace,"SF Mono",Menlo,monospace;
+    font-size:12.5px;color:#C8D2E0;
+    overflow-x:auto;
+  }
+  .code code{flex:1;white-space:nowrap}
+  .code button{
+    font:inherit;font-size:11.5px;
+    color:var(--muted);background:rgba(255,255,255,.05);
+    border:1px solid var(--line);border-radius:6px;
+    padding:4px 10px;cursor:pointer;transition:all .18s;flex:none;
+  }
+  .code button:hover{color:var(--text);border-color:var(--line-strong)}
+
+  /* ---------- footer ---------- */
+  footer{border-top:1px solid var(--line);padding:30px 0 44px}
+  .foot{display:flex;flex-wrap:wrap;gap:16px 28px;align-items:center;font-size:13px;color:var(--muted-dim)}
+  .foot-links{display:flex;flex-wrap:wrap;gap:18px;margin-left:auto}
+  .foot a{transition:color .18s}
+  .foot a:hover{color:var(--text)}
+  .foot .accent{color:var(--accent)}
+  .foot .accent:hover{color:#7FAEFF}
+
+  @media (max-width:640px){
+    .hero{padding:64px 0 60px}
+    .nav-links{display:none}
+    .light{padding:26px 20px}
+    .foot-links{margin-left:0}
+  }
+  @media (prefers-reduced-motion:reduce){
+    html{scroll-behavior:auto}
+    *{transition:none!important}
+  }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top">
+      <img src="assets/icon.png" alt="Zeroflow">
+      <span>Zeroflow</span>
+    </a>
+    <nav class="nav-links">
+      <a href="#features" data-i18n="nav.features">功能</a>
+      <a href="#install" data-i18n="nav.install">安装</a>
+      <a href="https://github.com/hellolio/zeroflow" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+    <div class="lang" role="group" aria-label="Language">
+      <button type="button" data-lang="zh" aria-pressed="true">中</button>
+      <button type="button" data-lang="en" aria-pressed="false">EN</button>
+      <button type="button" data-lang="ja" aria-pressed="false">日</button>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+  <section class="hero">
+    <div class="wrap">
+      <img class="app-icon" src="assets/icon.png" alt="Zeroflow app icon" width="108" height="108">
+      <h1>Zeroflow</h1>
+      <p class="tagline" data-i18n="hero.tagline">七种 macOS 效率工具，一个菜单栏图标</p>
+      <p class="sub" data-i18n="hero.sub">截图标注、窗口切换、Dock 增强、剪贴板历史、灵动岛。原生 Swift 编写，零第三方依赖，常驻内存极低。</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/hellolio/zeroflow/releases/latest" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/>
+          </svg>
+          <span data-i18n="hero.download">下载 DMG</span>
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/hellolio/zeroflow" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.95 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.85-2.34 4.7-4.57 4.94.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"/>
+          </svg>
+          <span>GitHub</span>
+        </a>
+      </div>
+      <p class="meta-line" data-i18n="hero.meta">macOS 14.0 Sonoma 及以上 · MIT 开源 · 免费无广告</p>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2 data-i18n="features.title">功能</h2>
+        <p class="sec-lead" data-i18n="features.lead">全部功能收在一个菜单栏图标里，快捷键均可自定义。</p>
+      </div>
+      <div class="grid">
+
+        <article class="card">
+          <div class="card-top">
+            <span class="ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                <path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8"/><path d="M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8"/>
+                <path d="M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16"/><path d="M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/>
+              </svg>
+            </span>
+            <kbd>⌘⇧S</kbd>
+          </div>
+          <h3 data-i18n="f1.t">截图标注</h3>
+          <p data-i18n="f1.d">随时截图，支持画线、矩形、圆框、文字气泡、马赛克，可撤销重做。</p>
+        </article>
+
+        <article class="card">
+          <div class="card-top">
+            <span class="ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="5" width="11" height="9" rx="2"/><rect x="10" y="10" width="11" height="9" rx="2"/>
+              </svg>
+            </span>
+            <kbd>⌘⇥</kbd>
+          </div>
+          <h3 data-i18n="f2.t">窗口切换</h3>
+          <p data-i18n="f2.d">以缩略图切换窗口，最小化与离屏窗口同样可见。</p>
+        </article>
+
+        <article class="card">
+          <div class="card-top">
+            <span class="ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                <rect x="3" y="14" width="18" height="6" rx="2.5"/><path d="M7 17h.01M11 17h.01M15 17h.01"/>
+              </svg>
+            </span>
+            <span class="chip">Dock</span>
+          </div>
+          <h3 data-i18n="f3.t">Dock 增强</h3>
+          <p data-i18n="f3.d">单击图标最小化窗口，悬停图标预览窗口内容。</p>
+        </article>
+
+        <article class="card">
+          <div class="card-top">
+            <span class="ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="5.5" y="5" width="13" height="16" rx="2"/><rect x="9" y="3" width="6" height="4" rx="1.2"/>
+              </svg>
+            </span>
+            <kbd>⌘⇧C</kbd>
+          </div>
+          <h3 data-i18n="f4.t">剪贴板历史</h3>
+          <p data-i18n="f4.d">呼出历史记录，搜索、方向键选择、回车直接粘贴。</p>
+        </article>
+
+        <article class="card">
+          <div class="card-top">
+            <span class="ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
+                <rect x="2.5" y="4" width="19" height="16" rx="3"/><path d="M8.5 4h7v3h-7z" fill="currentColor" stroke="none"/>
+              </svg>
+            </span>
+            <span class="chip">Notch</span>
+          </div>
+          <h3 data-i18n="f5.t">灵动岛</h3>
+          <p data-i18n="f5.d">悬停或单击刘海展开，显示日历、系统资源与正在播放。</p>
+        </article>
+
+        <article class="card">
+          <div class="card-top">
+            <span class="ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/>
+                <path d="M3 12h18" stroke-dasharray="2 2.4"/>
+              </svg>
+            </span>
+            <span class="chip">Finder</span>
+          </div>
+          <h3 data-i18n="f6.t">访达右键菜单</h3>
+          <p data-i18n="f6.d">在 Finder 中自定义右键命令，扩展经 App Group 与主程序通信。</p>
+        </article>
+
+        <article class="card">
+          <div class="card-top">
+            <span class="ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="8" y="2.5" width="8" height="19" rx="4"/><path d="M12 7v3M12 14v3"/>
+              </svg>
+            </span>
+            <span class="chip">Scroll</span>
+          </div>
+          <h3 data-i18n="f7.t">滚动方向</h3>
+          <p data-i18n="f7.d">翻转滚轮方向，触控板手势不受影响。</p>
+        </article>
+
+        <article class="card">
+          <div class="card-top">
+            <span class="ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h.01M10 10h.01M13.5 10h.01M17 10h.01M8 14h8"/>
+              </svg>
+            </span>
+            <span class="chip">⌘</span>
+          </div>
+          <h3 data-i18n="f8.t">快捷键自定义</h3>
+          <p data-i18n="f8.d">截图、窗口切换、剪贴板的快捷键均可改键，避开与系统冲突的组合。</p>
+        </article>
+
+        <article class="card">
+          <div class="card-top">
+            <span class="ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9"/><path d="M3 12h18"/>
+                <path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"/>
+              </svg>
+            </span>
+            <span class="chip">中 / EN / 日</span>
+          </div>
+          <h3 data-i18n="f9.t">多语言界面</h3>
+          <p data-i18n="f9.d">简体中文、English、日本語，默认跟随系统语言，也可手动指定。</p>
+        </article>
+
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="light">
+        <h2 data-i18n="light.title">功能更多，内存更少</h2>
+        <p data-i18n="light.body">与 AltTab、Maccy 相比，Zeroflow 的功能数倍于两者，常驻内存却远低于它们——无论是刚启动，还是长时间大量使用之后。</p>
+        <div class="compare">
+          <span data-i18n="light.c1">零第三方依赖</span>
+          <span data-i18n="light.c2">单 Xcode 工程</span>
+          <span data-i18n="light.c3">SwiftUI + AppKit</span>
+          <span data-i18n="light.c4">安装包小 · 启动快</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2 data-i18n="install.title">安装</h2>
+      </div>
+      <ol class="steps">
+        <li>
+          <span data-i18n="install.s1">从 Releases 下载最新的 DMG</span>
+          <small data-i18n="install.s1s">Zeroflow-x.x.x.dmg，约几 MB。</small>
+        </li>
+        <li>
+          <span data-i18n="install.s2">把 Zeroflow 拖入「应用程序」</span>
+        </li>
+        <li>
+          <span data-i18n="install.s3">首次启动若被 Gatekeeper 拦截，执行下方命令后重新打开</span>
+          <small data-i18n="install.s3s">也可到 系统设置 → 隐私与安全性，点「仍要打开」。</small>
+          <div class="code">
+            <code id="cmd">xattr -cr /Applications/Zeroflow.app</code>
+            <button type="button" id="copy" data-i18n="install.copy">复制</button>
+          </div>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <span>© <span id="year">2026</span> Zeroflow</span>
+    <span data-i18n="footer.license">MIT 协议</span>
+    <span class="foot-links">
+      <a href="https://github.com/hellolio/zeroflow/blob/main/README.zh-CN.md" target="_blank" rel="noopener">简体中文</a>
+      <a href="https://github.com/hellolio/zeroflow/blob/main/README.md" target="_blank" rel="noopener">English</a>
+      <a href="https://github.com/hellolio/zeroflow/blob/main/README.ja.md" target="_blank" rel="noopener">日本語</a>
+      <a class="accent" href="https://github.com/sponsors/hellolio" target="_blank" rel="noopener" data-i18n="footer.sponsor">赞助</a>
+    </span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var I18N = {
+    zh: {
+      "title": "Zeroflow — 七种 macOS 效率工具，一个菜单栏图标",
+      "nav.features": "功能",
+      "nav.install": "安装",
+      "hero.tagline": "七种 macOS 效率工具，一个菜单栏图标",
+      "hero.sub": "截图标注、窗口切换、Dock 增强、剪贴板历史、灵动岛。原生 Swift 编写，零第三方依赖，常驻内存极低。",
+      "hero.download": "下载 DMG",
+      "hero.meta": "macOS 14.0 Sonoma 及以上 · MIT 开源 · 免费无广告",
+      "features.title": "功能",
+      "features.lead": "全部功能收在一个菜单栏图标里，快捷键均可自定义。",
+      "f1.t": "截图标注", "f1.d": "随时截图，支持画线、矩形、圆框、文字气泡、马赛克，可撤销重做。",
+      "f2.t": "窗口切换", "f2.d": "以缩略图切换窗口，最小化与离屏窗口同样可见。",
+      "f3.t": "Dock 增强", "f3.d": "单击图标最小化窗口，悬停图标预览窗口内容。",
+      "f4.t": "剪贴板历史", "f4.d": "呼出历史记录，搜索、方向键选择、回车直接粘贴。",
+      "f5.t": "灵动岛", "f5.d": "悬停或单击刘海展开，显示日历、系统资源与正在播放。",
+      "f6.t": "访达右键菜单", "f6.d": "在 Finder 中自定义右键命令，扩展经 App Group 与主程序通信。",
+      "f7.t": "滚动方向", "f7.d": "翻转滚轮方向，触控板手势不受影响。",
+      "f8.t": "快捷键自定义", "f8.d": "截图、窗口切换、剪贴板的快捷键均可改键，避开与系统冲突的组合。",
+      "f9.t": "多语言界面", "f9.d": "简体中文、English、日本語，默认跟随系统语言，也可手动指定。",
+      "light.title": "功能更多，内存更少",
+      "light.body": "与 AltTab、Maccy 相比，Zeroflow 的功能数倍于两者，常驻内存却远低于它们——无论是刚启动，还是长时间大量使用之后。",
+      "light.c1": "零第三方依赖", "light.c2": "单 Xcode 工程", "light.c3": "SwiftUI + AppKit", "light.c4": "安装包小 · 启动快",
+      "install.title": "安装",
+      "install.s1": "从 Releases 下载最新的 DMG",
+      "install.s1s": "Zeroflow-x.x.x.dmg，约几 MB。",
+      "install.s2": "把 Zeroflow 拖入「应用程序」",
+      "install.s3": "首次启动若被 Gatekeeper 拦截，执行下方命令后重新打开",
+      "install.s3s": "也可到 系统设置 → 隐私与安全性，点「仍要打开」。",
+      "install.copy": "复制", "install.copied": "已复制",
+      "footer.license": "MIT 协议", "footer.sponsor": "赞助"
+    },
+    en: {
+      "title": "Zeroflow — Seven macOS utilities behind one menu bar icon",
+      "nav.features": "Features",
+      "nav.install": "Install",
+      "hero.tagline": "Seven macOS utilities behind one menu bar icon",
+      "hero.sub": "Screenshot annotation, window switching, Dock enhancements, clipboard history, Dynamic Island. Native Swift, zero third-party dependencies, minimal idle memory.",
+      "hero.download": "Download DMG",
+      "hero.meta": "macOS 14.0 Sonoma or later · MIT licensed · Free, no ads",
+      "features.title": "Features",
+      "features.lead": "Everything lives behind a single menu bar icon, with configurable shortcuts.",
+      "f1.t": "Screenshot annotation", "f1.d": "Capture anytime, then draw lines, rectangles, circles, text bubbles or mosaic. Undo and redo included.",
+      "f2.t": "Window switcher", "f2.d": "Switch windows by thumbnail — minimized and off-screen windows included.",
+      "f3.t": "Dock enhancements", "f3.d": "Click the Dock icon to minimize a window; hover it to preview contents.",
+      "f4.t": "Clipboard history", "f4.d": "Open history, search, pick with the arrow keys, paste with Return.",
+      "f5.t": "Dynamic Island", "f5.d": "Hover or click the notch to expand: calendar, system resources and now playing.",
+      "f6.t": "Finder context menu", "f6.d": "Custom right-click commands in Finder, with the extension talking to the app via App Group.",
+      "f7.t": "Scroll direction", "f7.d": "Reverses wheel scrolling without affecting trackpad gestures.",
+      "f8.t": "Configurable shortcuts", "f8.d": "Rebind screenshot, switcher and clipboard shortcuts to avoid clashes with system ones.",
+      "f9.t": "Multilingual UI", "f9.d": "简体中文, English and 日本語 — follows the system language by default, or set it manually.",
+      "light.title": "More features. Less memory.",
+      "light.body": "Compared to AltTab and Maccy, Zeroflow offers several times more functionality while using significantly less memory — right after launch and after extended use alike.",
+      "light.c1": "Zero dependencies", "light.c2": "Single Xcode project", "light.c3": "SwiftUI + AppKit", "light.c4": "Small download, fast launch",
+      "install.title": "Install",
+      "install.s1": "Download the latest DMG from Releases",
+      "install.s1s": "Zeroflow-x.x.x.dmg — only a few MB.",
+      "install.s2": "Drag Zeroflow into Applications",
+      "install.s3": "If Gatekeeper blocks the first launch, run the command below and open it again",
+      "install.s3s": "Or go to System Settings → Privacy & Security and click \"Open Anyway\".",
+      "install.copy": "Copy", "install.copied": "Copied",
+      "footer.license": "MIT License", "footer.sponsor": "Sponsor"
+    },
+    ja: {
+      "title": "Zeroflow — メニューバーのアイコン1つに、7つの macOS ユーティリティ",
+      "nav.features": "機能",
+      "nav.install": "インストール",
+      "hero.tagline": "メニューバーのアイコン1つに、7つの macOS ユーティリティ",
+      "hero.sub": "スクリーンショット注釈、ウィンドウ切り替え、Dock 拡張、クリップボード履歴、ダイナミックアイランド。ネイティブ Swift 製、サードパーティ依存ゼロ、常駐メモリはごくわずか。",
+      "hero.download": "DMG をダウンロード",
+      "hero.meta": "macOS 14.0 Sonoma 以降 · MIT ライセンス · 無料・広告なし",
+      "features.title": "機能",
+      "features.lead": "すべての機能がメニューバーのアイコン1つに。ショートカットは変更可能です。",
+      "f1.t": "スクリーンショット注釈", "f1.d": "いつでも撮影し、線・矩形・円・テキスト吹き出し・モザイクで加工。元に戻す／やり直しにも対応。",
+      "f2.t": "ウィンドウ切り替え", "f2.d": "サムネイルでウィンドウを切り替え。最小化・画面外のウィンドウも表示されます。",
+      "f3.t": "Dock 拡張", "f3.d": "アイコンをクリックでウィンドウを最小化、ホバーで内容をプレビュー。",
+      "f4.t": "クリップボード履歴", "f4.d": "履歴を呼び出し、検索・矢印キーで選択・Return で貼り付け。",
+      "f5.t": "ダイナミックアイランド", "f5.d": "ノッチをホバーまたはクリックで展開。カレンダー、システムリソース、再生中を表示。",
+      "f6.t": "Finder 右クリックメニュー", "f6.d": "Finder の右クリックコマンドをカスタマイズ。拡張は App Group 経由で本体と通信します。",
+      "f7.t": "スクロール方向", "f7.d": "ホイールのスクロール方向を反転。トラックパッドのジェスチャーには影響しません。",
+      "f8.t": "ショートカット変更", "f8.d": "スクリーンショット・切り替え・クリップボードのショートカットを変更し、システムとの競合を回避できます。",
+      "f9.t": "多言語インターフェース", "f9.d": "简体中文・English・日本語に対応。既定ではシステム言語に従い、手動で指定もできます。",
+      "light.title": "機能はもっと、メモリはもっと少なく",
+      "light.body": "AltTab や Maccy と比べて、Zeroflow は機能が数倍ありながら常駐メモリは大幅に少ない。起動直後でも、長時間の使用後でも変わりません。",
+      "light.c1": "サードパーティ依存ゼロ", "light.c2": "単一 Xcode プロジェクト", "light.c3": "SwiftUI + AppKit", "light.c4": "軽い配布物・高速起動",
+      "install.title": "インストール",
+      "install.s1": "Releases から最新の DMG をダウンロード",
+      "install.s1s": "Zeroflow-x.x.x.dmg、数 MB 程度。",
+      "install.s2": "Zeroflow を「アプリケーション」へドラッグ",
+      "install.s3": "初回起動時に Gatekeeper にブロックされたら、以下のコマンドを実行して再度開く",
+      "install.s3s": "または システム設定 → プライバシーとセキュリティ で「このまま開く」を選択。",
+      "install.copy": "コピー", "install.copied": "コピーしました",
+      "footer.license": "MIT ライセンス", "footer.sponsor": "スポンサー"
+    }
+  };
+
+  var HTML_LANG = { zh: "zh-CN", en: "en", ja: "ja" };
+  var nodes = document.querySelectorAll("[data-i18n]");
+  var buttons = document.querySelectorAll(".lang button");
+  var copyBtn = document.getElementById("copy");
+  var current = "zh";
+
+  function apply(lang) {
+    var dict = I18N[lang] || I18N.zh;
+    current = I18N[lang] ? lang : "zh";
+    nodes.forEach(function (el) {
+      var val = dict[el.getAttribute("data-i18n")];
+      if (val) el.textContent = val;
+    });
+    document.documentElement.lang = HTML_LANG[current];
+    document.title = dict["title"];
+    buttons.forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.lang === current));
+    });
+    if (copyBtn) copyBtn.textContent = dict["install.copy"];
+    try { localStorage.setItem("zf-lang", current); } catch (e) {}
+  }
+
+  function guess() {
+    var saved = null;
+    try { saved = localStorage.getItem("zf-lang"); } catch (e) {}
+    if (saved && I18N[saved]) return saved;
+    var nav = (navigator.language || "en").toLowerCase();
+    if (nav.indexOf("ja") === 0) return "ja";
+    if (nav.indexOf("zh") === 0) return "zh";
+    return "en";
+  }
+
+  buttons.forEach(function (b) {
+    b.addEventListener("click", function () { apply(b.dataset.lang); });
+  });
+
+  if (copyBtn) {
+    copyBtn.addEventListener("click", function () {
+      var text = document.getElementById("cmd").textContent;
+      var done = function () {
+        copyBtn.textContent = I18N[current]["install.copied"];
+        setTimeout(function () { copyBtn.textContent = I18N[current]["install.copy"]; }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () {});
+      } else {
+        var r = document.createRange();
+        r.selectNodeContents(document.getElementById("cmd"));
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(r);
+        try { document.execCommand("copy"); done(); } catch (e) {}
+      }
+    });
+  }
+
+  document.getElementById("year").textContent = new Date().getFullYear();
+  apply(guess());
+})();
+</script>
+</body>
+</html>

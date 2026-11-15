@@ -10,7 +10,7 @@ extension Notification.Name {
 }
 
 /// 菜单栏控制器：常驻菜单栏，提供「设置」与「退出」
-final class MenuBarController: NSObject, NSApplicationDelegate {
+final class MenuBarController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
 
     private var settingsWindowController: NSWindowController?
@@ -127,6 +127,10 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
                 WindowActivator.shared.focus(window: w)
             }
         }
+
+        // 内存探针 / 循环压测（默认关闭，见 MemoryProbe / MemoryCycleRunner）
+        MemoryProbe.startIfNeeded()
+        MemoryCycleRunner.startIfNeeded()
     }
 
     private func setupMenuBar() {
@@ -199,12 +203,23 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
             window.setContentSize(NSSize(width: 860, height: 640))
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
+            window.delegate = self
             window.center()
             settingsWindowController = NSWindowController(window: window)
         }
         settingsWindowController?.showWindow(nil)
         settingsWindowController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// 关窗即释放设置窗口及其 9 个标签页的 SwiftUI 视图树；下次打开重新创建。
+    /// 延后一拍再置 nil，避免在 AppKit 的关窗回调里同步释放窗口自身。
+    func windowWillClose(_ notification: Notification) {
+        let closing = notification.object as? NSWindow
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.settingsWindowController?.window === closing else { return }
+            self.settingsWindowController = nil
+        }
     }
 
     @objc private func quit() {

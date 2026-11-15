@@ -8,8 +8,15 @@ import ApplicationServices
 final class WindowActivityTracker {
     static let shared = WindowActivityTracker()
 
+    /// 调试开关缓存：noteFocus 是焦点回调热路径，别每次构造环境字典
+    private static let switcherDebug = ProcessInfo.processInfo.environment["ZEROFLOW_SWITCHER_DEBUG"] == "1"
+    /// MRU 表上限：窗口 ID 会持续累积（app 退出时按 pid 清理），这里再兜底裁剪最旧的一半
+    private static let maxTrackedWindows = 2048
+
     private let lock = NSLock()
     private var activity: [CGWindowID: Date] = [:]
+    /// 窗口 → 所属 pid（仅用于 app 退出时清理对应 MRU 记录）
+    private var activityOwner: [CGWindowID: pid_t] = [:]
     /// ⌘⇥ 激活护栏：激活「同 app 的非 key 窗口」（b1/b2 同属一个 app，从 a 切到 b2）时，目标 app 的
     /// 激活过程会先把该 app 上一次的 key 窗口短暂置焦——AppKit 激活先 key 旧窗口（AX
     /// focusedWindowChanged 会发），随后 WindowActivator 的 makeKeyWindow 事件记录才把 key 收敛到
@@ -59,7 +66,7 @@ final class WindowActivityTracker {
                 } else {
                     // 护栏期内同 app 其他窗口的焦点时间戳 = 激活瞬态，丢弃
                     lock.unlock()
-                    if ProcessInfo.processInfo.environment["ZEROFLOW_SWITCHER_DEBUG"] == "1" {
+                    if Self.switcherDebug {
                         ZSLog("MRU drop wid=\(wid) source=\(source) (switcher guard pid=\(guardTarget.pid) target=\(guardTarget.wid))")
                     }
                     return
@@ -67,8 +74,10 @@ final class WindowActivityTracker {
             }
         }
         activity[wid] = Date()
+        activityOwner[wid] = pid
+        pruneIfNeededLocked()
         lock.unlock()
-        if ProcessInfo.processInfo.environment["ZEROFLOW_SWITCHER_DEBUG"] == "1" {
+        if Self.switcherDebug {
             ZSLog("MRU noteFocus wid=\(wid) source=\(source)")
         }
     }
@@ -80,8 +89,10 @@ final class WindowActivityTracker {
         lock.lock()
         switcherGuard = (pid, wid, Date().addingTimeInterval(1.0))
         activity[wid] = Date()
+        activityOwner[wid] = pid
+        pruneIfNeededLocked()
         lock.unlock()
-        if ProcessInfo.processInfo.environment["ZEROFLOW_SWITCHER_DEBUG"] == "1" {
+        if Self.switcherDebug {
             ZSLog("MRU noteFocus wid=\(wid) source=switcher (guard on pid=\(pid))")
         }
     }
@@ -149,10 +160,25 @@ final class WindowActivityTracker {
     private func removeObserver(for pid: pid_t) {
         lock.lock()
         let observer = axObservers.removeValue(forKey: pid)
+        // app 已退出：一并清掉它的窗口 MRU，避免字典随窗口开关无限增长
+        for wid in activityOwner.compactMap({ $0.value == pid ? $0.key : nil }) {
+            activity.removeValue(forKey: wid)
+            activityOwner.removeValue(forKey: wid)
+        }
         lock.unlock()
         if let observer {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         }
+    }
+
+    /// 超出上限时保留最近一半（调用于持锁状态）
+    private func pruneIfNeededLocked() {
+        guard activity.count > Self.maxTrackedWindows else { return }
+        let keep = Set(activity.sorted { $0.value > $1.value }
+            .prefix(Self.maxTrackedWindows / 2)
+            .map(\.key))
+        activity = activity.filter { keep.contains($0.key) }
+        activityOwner = activityOwner.filter { keep.contains($0.key) }
     }
 
     // MARK: - 激活 / Space 切换补记（对齐 AltTab「激活时重读聚焦窗口」的 workaround）

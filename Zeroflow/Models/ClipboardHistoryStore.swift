@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import CryptoKit
+import ImageIO
 
 /// 剪贴板历史存储：去重置顶、按设置裁剪条数、JSON 持久化到 Application Support。
 /// 图片存 `Application Support/zeroflow/clipboard-images/`，裁剪/清空时同步删除文件。
@@ -20,9 +21,18 @@ final class ClipboardHistoryStore: ObservableObject {
     private let historyFile: URL
     /// 编码/写盘放串行后台队列，避免大历史阻塞主线程；顺序由队列保证
     private let ioQueue = DispatchQueue(label: "zeroflow.clipboard-history.io", qos: .utility)
-    private let imageCache = NSCache<NSString, NSImage>()
+    /// 按用途分别缓存解码结果：列表行只留小缩略图，预览封顶 1024px，避免全尺寸解码常驻
+    private let thumbnailCache = NSCache<NSString, NSImage>()
+    private let previewCache = NSCache<NSString, NSImage>()
+    /// 历史在后台解码；完成前到达的新条目先缓冲，避免被随后落地的旧快照覆盖
+    private var isLoaded = false
+    private var pendingItems: [ClipboardItem] = []
+    /// 清空/重置时递增，作废在途加载结果
+    private var loadGeneration = 0
 
     private init() {
+        thumbnailCache.totalCostLimit = 4 * 1024 * 1024
+        previewCache.totalCostLimit = 24 * 1024 * 1024
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support", isDirectory: true)
@@ -30,7 +40,7 @@ final class ClipboardHistoryStore: ObservableObject {
         imagesDirectory = baseDirectory.appendingPathComponent("clipboard-images", isDirectory: true)
         historyFile = baseDirectory.appendingPathComponent("clipboard-history.json")
         try? fileManager.createDirectory(at: imagesDirectory, withIntermediateDirectories: true)
-        load()
+        loadInBackground()
     }
 
     // MARK: - 写入
@@ -90,23 +100,54 @@ final class ClipboardHistoryStore: ObservableObject {
         return try? Data(contentsOf: url)
     }
 
-    func image(for item: ClipboardItem) -> NSImage? {
+    func thumbnail(for item: ClipboardItem) -> NSImage? {
+        decodedImage(for: item, maxPixelSize: 64, cache: thumbnailCache, keyPrefix: "thumb:")
+    }
+
+    func previewImage(for item: ClipboardItem) -> NSImage? {
+        decodedImage(for: item, maxPixelSize: 1024, cache: previewCache, keyPrefix: "preview:")
+    }
+
+    private func decodedImage(for item: ClipboardItem,
+                              maxPixelSize: Int,
+                              cache: NSCache<NSString, NSImage>,
+                              keyPrefix: String) -> NSImage? {
         guard let url = imageURL(for: item) else { return nil }
-        let key = url.lastPathComponent as NSString
-        if let cached = imageCache.object(forKey: key) { return cached }
-        guard let image = NSImage(contentsOf: url) else { return nil }
-        imageCache.setObject(image, forKey: key)
+        let key = Self.cacheKey(prefix: keyPrefix, url: url)
+        if let cached = cache.object(forKey: key) { return cached }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let pixelWidth = properties?[kCGImagePropertyPixelWidth] as? Int ?? maxPixelSize
+        let pixelHeight = properties?[kCGImagePropertyPixelHeight] as? Int ?? maxPixelSize
+        let limit = min(maxPixelSize, max(pixelWidth, pixelHeight))
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: limit,
+        ] as CFDictionary)
+        else { return nil }
+        let image = NSImage(cgImage: cgImage,
+                            size: NSSize(width: cgImage.width, height: cgImage.height))
+        cache.setObject(image, forKey: key, cost: cgImage.width * cgImage.height * 4)
         return image
+    }
+
+    private static func cacheKey(prefix: String, url: URL) -> NSString {
+        "\(prefix)\(url.lastPathComponent)" as NSString
     }
 
     // MARK: - 维护
 
     /// 按当前「最多保存条数」裁剪（设置页改条数后调用）
     func trimToLimit() {
+        guard isLoaded else { return }
         trimToLimit(persist: true)
     }
 
     func clear() {
+        loadGeneration += 1
+        isLoaded = true
+        pendingItems.removeAll()
         for item in items { removeImageFile(for: item) }
         items.removeAll()
         persist()
@@ -115,6 +156,10 @@ final class ClipboardHistoryStore: ObservableObject {
     // MARK: - 内部
 
     private func insert(_ item: ClipboardItem) {
+        guard isLoaded else {
+            pendingItems.insert(item, at: 0)
+            return
+        }
         // 同一内容再复制只置顶：先移除旧条目（连同其图片文件）
         let duplicates = items.filter { $0.contentHash == item.contentHash && $0.kind == item.kind }
         if !duplicates.isEmpty {
@@ -137,20 +182,41 @@ final class ClipboardHistoryStore: ObservableObject {
 
     private func removeImageFile(for item: ClipboardItem) {
         guard let url = imageURL(for: item) else { return }
-        imageCache.removeObject(forKey: url.lastPathComponent as NSString)
+        thumbnailCache.removeObject(forKey: Self.cacheKey(prefix: "thumb:", url: url))
+        previewCache.removeObject(forKey: Self.cacheKey(prefix: "preview:", url: url))
         try? fileManager.removeItem(at: url)
     }
 
-    private func load() {
-        guard let data = try? Data(contentsOf: historyFile) else { return }
+    private func loadInBackground() {
+        let generation = loadGeneration
+        let url = historyFile
+        ioQueue.async { [weak self] in
+            let stored = Self.decodeHistory(at: url)
+            DispatchQueue.main.async {
+                guard let self, self.loadGeneration == generation else { return }
+                self.applyLoaded(stored)
+            }
+        }
+    }
+
+    private static func decodeHistory(at url: URL) -> [ClipboardItem] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         guard let stored = try? decoder.decode([ClipboardItem].self, from: data) else {
             ZSLog("clipboard: decode history failed")
-            return
+            return []
         }
-        items = stored
-        trimToLimit(persist: false)
+        return stored
+    }
+
+    private func applyLoaded(_ stored: [ClipboardItem]) {
+        isLoaded = true
+        let pending = pendingItems
+        pendingItems = []
+        let pendingKeys = Set(pending.map { "\($0.kind)-\($0.contentHash)" })
+        items = pending + stored.filter { !pendingKeys.contains("\($0.kind)-\($0.contentHash)") }
+        trimToLimit(persist: !pending.isEmpty)
     }
 
     private func persist() {

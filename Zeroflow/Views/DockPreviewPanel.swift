@@ -121,6 +121,16 @@ final class DockPreviewPanel: NSPanel {
         layoutAndPosition()
     }
 
+    /// 收起后释放内容树（SwiftUI hosting + 玻璃背景）与锚点，下次 present 重建。
+    func teardown() {
+        contentView = nil
+        hostingContainer = nil
+        contentModel = nil
+        onSelect = nil
+        onClose = nil
+        anchorTL = nil
+    }
+
     private func rebuildContentView() {
         guard let contentModel, let onSelect, let onClose else { return }
         let glass = SettingsStore.shared.dockPreviewGlassBackground

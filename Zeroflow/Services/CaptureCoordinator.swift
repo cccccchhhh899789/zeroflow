@@ -194,22 +194,47 @@ final class CaptureCoordinator: NSObject, ObservableObject {
     // MARK: - 编辑器
 
     /// 调试专用：直接打开编辑页（绕过取景权限），用一张合成网格图测试标注
-    func openEditorForDebug() {
-        ZSLog("openEditorForDebug: synthetic 800x500 image")
-        let size = NSSize(width: 800, height: 500)
+    func openEditorForDebug(size: NSSize = NSSize(width: 800, height: 500)) {
+        ZSLog("openEditorForDebug: synthetic \(Int(size.width))x\(Int(size.height)) image")
+        let w = max(1, Int(size.width))
+        let h = max(1, Int(size.height))
+        // 按像素 1:1 建位图：lockFocus 在 Retina 上会按 2x 建图（5K → 10240×5760），
+        // 内存循环测试要的是真实截图量级，不是 4 倍像素的调试图。
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: w, pixelsHigh: h,
+                                         bitsPerSample: 8, samplesPerPixel: 4,
+                                         hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0) else { return }
+        NSGraphicsContext.saveGraphicsState()
+        if let ctx = NSGraphicsContext(bitmapImageRep: rep) {
+            NSGraphicsContext.current = ctx
+            NSColor.white.setFill()
+            NSRect(origin: .zero, size: size).fill()
+            NSColor.lightGray.withAlphaComponent(0.5).setStroke()
+            for x in stride(from: CGFloat(0), through: size.width, by: 50) {
+                NSBezierPath(rect: NSRect(x: x, y: 0, width: 1, height: size.height)).stroke()
+            }
+            for y in stride(from: CGFloat(0), through: size.height, by: 50) {
+                NSBezierPath(rect: NSRect(x: 0, y: y, width: size.width, height: 1)).stroke()
+            }
+        }
+        NSGraphicsContext.restoreGraphicsState()
         let image = NSImage(size: size)
-        image.lockFocus()
-        NSColor.white.setFill()
-        NSRect(origin: .zero, size: size).fill()
-        NSColor.lightGray.withAlphaComponent(0.5).setStroke()
-        for x in stride(from: CGFloat(0), through: size.width, by: 50) {
-            NSBezierPath(rect: NSRect(x: x, y: 0, width: 1, height: size.height)).stroke()
-        }
-        for y in stride(from: CGFloat(0), through: size.height, by: 50) {
-            NSBezierPath(rect: NSRect(x: 0, y: y, width: size.width, height: 1)).stroke()
-        }
-        image.unlockFocus()
+        image.addRepresentation(rep)
         self.openEditor(image: image)
+        if MemoryProbe.isEnabled { MemoryProbe.log("editor-opened") }
+    }
+
+    /// 调试：关闭编辑页（内存循环用）
+    func closeEditorForDebug() {
+        let hadController = editorController != nil
+        editorController?.close()
+        editorController = nil
+        if MemoryProbe.isEnabled {
+            ZSLog("MEM editor close hadController=\(hadController) windows=\(NSApp.windows.count) visible=\(NSApp.windows.filter(\.isVisible).count)")
+            MemoryProbe.log("editor-closed")
+        }
     }
 
     private func openEditor(image: NSImage) {
@@ -293,6 +318,8 @@ final class CaptureCoordinator: NSObject, ObservableObject {
 extension CaptureCoordinator: NSWindowDelegate {
     /// 编辑窗口被关闭（点红点 / ⌘W）时释放控制器，避免整张截图常驻内存
     func windowWillClose(_ notification: Notification) {
+        // onDisappear 之外再兜一层：任何关闭路径都不留下持有 EditorView 的键盘监听器
+        EditorKeyMonitor.shared.removeAll()
         editorController = nil
     }
 }

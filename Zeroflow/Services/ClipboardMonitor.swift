@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 
 /// 剪贴板监听：NSPasteboard 没有变化通知，只能轮询 `changeCount`（0.35s，够快且成本可忽略）。
 /// 受「启用剪贴板历史」开关控制，关闭时定时器完全移除。
@@ -105,7 +106,11 @@ final class ClipboardMonitor {
     }
 
     private static func pixelSize(ofPNG data: Data) -> CGSize? {
-        guard let bitmap = NSBitmapImageRep(data: data) else { return nil }
-        return CGSize(width: bitmap.pixelsWide, height: bitmap.pixelsHigh)
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int
+        else { return nil }
+        return CGSize(width: width, height: height)
     }
 }

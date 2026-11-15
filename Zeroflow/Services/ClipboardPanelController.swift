@@ -134,6 +134,9 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         guard let panel, panel.isVisible, !isDismissing else { return }
         isDismissing = true
         panel.orderOut(nil)
+        // 释放 SwiftUI 内容树与液态玻璃背景；下次弹出由 show() 重建
+        panel.contentView = nil
+        model = nil
         isDismissing = false
         cancellables.removeAll()
         ZSLog("clipboard panel dismissed")
@@ -156,6 +159,21 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         model.$query
             .dropFirst()
             .sink { [weak self] _ in self?.handleQueryChange() }
+            .store(in: &cancellables)
+        // 历史在后台加载：面板若先弹出（items 还是空），加载完成后补进模型
+        ClipboardHistoryStore.shared.$items
+            .dropFirst()
+            .sink { [weak self] items in
+                guard let self, self.model === model else { return }
+                let wasEmpty = model.items.isEmpty
+                guard wasEmpty || model.items.map(\.id) != items.map(\.id) else { return }
+                model.items = items
+                model.selectedIndex = min(model.selectedIndex, max(0, model.filteredItems.count - 1))
+                if let preview = model.previewItem, !items.contains(where: { $0.id == preview.id }) {
+                    model.previewItem = nil
+                }
+                if wasEmpty { self.applyFrame(animated: false) }
+            }
             .store(in: &cancellables)
     }
 

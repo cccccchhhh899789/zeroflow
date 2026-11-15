@@ -1,6 +1,32 @@
 import SwiftUI
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
+
+/// 编辑页键盘监听器的持有者。必须放在 SwiftUI `@State` 之外：
+/// monitor 的 block 捕获整个 EditorView（含 `@StateObject` doc → 底图），
+/// 若 token 存在 `@State` 里，SwiftUI 的 StoredLocation 会与 observer 组成自持环，
+/// 编辑页关闭后整张图都释放不掉（DEV-052）。
+final class EditorKeyMonitor {
+    static let shared = EditorKeyMonitor()
+    private var monitor: Any?
+
+    private init() {}
+
+    var isInstalled: Bool { monitor != nil }
+
+    func install(_ handler: @escaping (NSEvent) -> NSEvent?) {
+        removeAll()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: handler)
+    }
+
+    func removeAll() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+}
 
 /// 编辑页主视图：画布 + 底部工具栏
 struct EditorView: View {
@@ -93,16 +119,19 @@ struct EditorView: View {
             installKeyboardMonitor()
         }
         .onDisappear {
+            if MemoryProbe.isEnabled {
+                ZSLog("MEM editor onDisappear monitor=\(EditorKeyMonitor.shared.isInstalled)")
+            }
             removeKeyboardMonitor()
         }
     }
 
     // MARK: - 键盘快捷键
 
-    @State private var keyboardMonitor: Any?
-
     private func installKeyboardMonitor() {
-        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        // 监听器 token 不能存进 @State：block 捕获整个 EditorView（含 @StateObject doc），
+        // @State 又持有 monitor，会形成自持环，编辑页关闭后底图永远释放不掉（DEV-052）。
+        EditorKeyMonitor.shared.install { event in
             let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
             // 正在编辑标注文字：除 Esc（提交并退出编辑）外，全部放行给文本编辑器
             if self.editingBubbleID != nil {
@@ -147,9 +176,10 @@ struct EditorView: View {
     }
 
     private func removeKeyboardMonitor() {
-        if let monitor = keyboardMonitor {
-            NSEvent.removeMonitor(monitor)
+        if MemoryProbe.isEnabled {
+            ZSLog("MEM editor removeKeyboardMonitor had=\(EditorKeyMonitor.shared.isInstalled)")
         }
+        EditorKeyMonitor.shared.removeAll()
     }
 
     private var canvasArea: some View {
@@ -188,30 +218,63 @@ struct EditorView: View {
         }
     }
 
+    /// 层序规则（预览与导出 `exportedImage` 必须完全一致）：
+    /// - 底层：画笔 / 矩形圆框 / 马赛克，按添加顺序，后加的盖住先加的
+    /// - 顶层：文字气泡**永远**压在底层之上，气泡之间按添加顺序
+    /// 临时笔划落在底层的最上面（所见即所得），选中控点最后单独画。
     private func drawElements(context: GraphicsContext, size: CGSize) {
-        var strokes: [StrokeElement] = []
-        if let temp = tempStroke { strokes.append(temp) }
-        for case .stroke(let s) in doc.elements { strokes.append(s) }
-        for stroke in strokes { drawStroke(stroke, context: context) }
-
-        for case .shape(let s) in doc.elements {
-            drawShape(s, context: context, selected: s.id == selectedElementID)
+        // 底层：非气泡元素，按添加顺序
+        for element in doc.elements {
+            switch element {
+            case .stroke(let s):
+                drawStroke(s, context: context)
+            case .shape(let s):
+                drawShape(s, context: context)
+            case .mosaic(let m):
+                drawMosaic(m, context: context)
+            case .bubble:
+                continue
+            }
         }
-        if let temp = tempShape {
-            drawShape(temp, context: context, selected: false)
-        }
 
+        // 正在绘制的临时元素 = 底层里最新的一笔，仍在气泡之下
+        if let temp = tempStroke { drawStroke(temp, context: context) }
+        if let temp = tempShape { drawShape(temp, context: context) }
+        if let temp = tempMosaic { drawMosaic(temp, context: context) }
+
+        // 顶层：文字气泡永远压在上面，气泡之间按添加顺序
         for case .bubble(let b) in doc.elements {
             drawBubble(b, context: context, showText: b.id != editingBubbleID,
                        hovered: b.id == hoveredBubbleID,
                        selected: b.id == selectedElementID)
         }
 
-        if let temp = tempMosaic {
-            drawMosaic(temp, context: context)
+        // 选中控点独立成层：否则被上层元素压住后拿不到、拖不动
+        drawSelectionOverlay(context: context)
+    }
+
+    /// 视觉层序（自下而上）：非气泡按添加顺序，气泡按添加顺序接在后面。
+    /// 命中测试与导出都依赖这个顺序，不要各自实现一遍。
+    static func zOrdered(_ elements: [CanvasElement]) -> [CanvasElement] {
+        var bottom: [CanvasElement] = []
+        var bubbles: [CanvasElement] = []
+        bottom.reserveCapacity(elements.count)
+        for element in elements {
+            if case .bubble = element { bubbles.append(element) } else { bottom.append(element) }
         }
-        for case .mosaic(let m) in doc.elements {
-            drawMosaic(m, context: context)
+        return bottom + bubbles
+    }
+
+    private var zOrderedElements: [CanvasElement] { Self.zOrdered(doc.elements) }
+
+    /// 选中元素的四角缩放控点：在所有元素之后单独绘制，保证永远可见
+    private func drawSelectionOverlay(context: GraphicsContext) {
+        guard let id = selectedElementID,
+              let element = doc.elements.first(where: { $0.id == id }) else { return }
+        switch element {
+        case .bubble(let b): drawSelectionHandles(for: toViewRect(b.box), context: context)
+        case .shape(let s): drawSelectionHandles(for: toViewRect(s.box), context: context)
+        case .stroke, .mosaic: break
         }
     }
 
@@ -386,12 +449,17 @@ struct EditorView: View {
         return CGRect(x: anchor.x + 10, y: anchor.y - h - 12, width: w, height: h)
     }
 
+    /// 命中测试：按视觉层序从最上层往下扫，先命中的就是看起来最上面的元素
     private func element(at location: CGPoint) -> (UUID, CanvasElement)? {
-        for case .bubble(let b) in doc.elements {
-            if bubbleHitRect(b).contains(location) { return (b.id, .bubble(b)) }
-        }
-        for case .shape(let s) in doc.elements {
-            if shapeHitRect(s).contains(location) { return (s.id, .shape(s)) }
+        for element in zOrderedElements.reversed() {
+            switch element {
+            case .bubble(let b):
+                if bubbleHitRect(b).contains(location) { return (b.id, .bubble(b)) }
+            case .shape(let s):
+                if shapeHitRect(s).contains(location) { return (s.id, .shape(s)) }
+            case .stroke, .mosaic:
+                continue
+            }
         }
         return nil
     }
@@ -411,8 +479,8 @@ struct EditorView: View {
         // 若正处于某个标注的文字编辑中，先提交关闭覆盖层，避免挡住拖动
         commitAnyPendingEdit()
 
-        // 1) 所有标注的四个角缩放控点（气泡 + 形状）
-        for element in doc.elements {
+        // 1) 所有标注的四个角缩放控点（气泡 + 形状），从最上层往下找
+        for element in zOrderedElements.reversed() {
             let box: CGRect
             switch element {
             case .bubble(let b): box = b.box
@@ -433,7 +501,7 @@ struct EditorView: View {
             }
         }
         // 2) 气泡锚点
-        for case .bubble(let b) in doc.elements {
+        for case .bubble(let b) in doc.elements.reversed() {
             let anchorView = toView(b.anchor)
             let anchorHit = CGRect(x: anchorView.x - 9, y: anchorView.y - 9, width: 18, height: 18)
             if anchorHit.contains(location) {
@@ -585,7 +653,8 @@ struct EditorView: View {
     }
 
     /// 矩形 / 圆框标注绘制（仅描边、透明填充）
-    private func drawShape(_ shape: ShapeElement, context: GraphicsContext, selected: Bool) {
+    /// 缩放控点由 `drawSelectionOverlay` 统一在顶层绘制，这里不画
+    private func drawShape(_ shape: ShapeElement, context: GraphicsContext) {
         let box = toViewRect(shape.box)
         let path: Path
         switch shape.style {
@@ -595,9 +664,6 @@ struct EditorView: View {
         context.stroke(path, with: .color(shape.color),
                        style: StrokeStyle(lineWidth: shape.lineWidth * scaleFactor,
                                           lineJoin: .round))
-        if selected {
-            drawSelectionHandles(for: box, context: context)
-        }
     }
 
     /// 选中状态的四角缩放控点
@@ -689,16 +755,12 @@ struct EditorView: View {
                 .foregroundColor(.black)
             context.draw(text, in: box.insetBy(dx: 6, dy: 4))
         }
-
-        // 选中时显示四周缩放控点
-        if selected {
-            drawSelectionHandles(for: box, context: context)
-        }
     }
 
     /// 命中测试：根据画布坐标返回悬停的标注框 id（文本框 + 锚点）
+    /// 从最上层往下找，重叠时优先命中最上面那个
     private func hoveredBubbleID(at location: CGPoint) -> UUID? {
-        for case .bubble(let b) in doc.elements {
+        for case .bubble(let b) in doc.elements.reversed() {
             if bubbleHitRect(b).contains(location) { return b.id }
         }
         return nil
@@ -725,11 +787,25 @@ struct EditorView: View {
     }
 
     /// 点击存在的标注 → 进入文字编辑模式
+    /// 同时把该标注提到最顶层：编辑态与提交后看到的层序完全一致，
+    /// 也避免它被上层马赛克/方框盖住时看不清正在编辑什么。
     private func startTextEdit(for id: UUID) {
         guard let (_, b) = bubbleWith(id: id) else { return }
+        bringToFront(id: id)
         bubbleText = b.text
         editingBubbleID = id
         selectedElementID = id
+    }
+
+    /// 把指定元素移到数组末尾（= 最上层）。已是最上层时不产生多余的撤销记录。
+    private func bringToFront(id: UUID) {
+        guard let index = doc.elements.firstIndex(where: { $0.id == id }),
+              index != doc.elements.count - 1 else { return }
+        doc.snapshotBeforeChange()
+        var list = doc.elements
+        let element = list.remove(at: index)
+        list.append(element)
+        doc.elements = list   // 一次性赋值，只触发一次重绘
     }
 
     private func commitBubbleEdit(_ bubble: BubbleElement) {
@@ -1044,6 +1120,10 @@ struct EditorView: View {
     /// 按原图尺寸重绘整张导出图（无视图依赖）。在后台线程调用（AppKit 离屏绘制线程安全）。
     /// 画布按原图「原生像素」建位图（不再用 NSImage(size:)+lockFocus 的隐式像素密度），
     /// 上下文按 pixelScale 缩放后复用点坐标绘制——保证导出 PNG 分辨率 = 屏幕原生分辨率。
+    ///
+    /// 坐标系：位图上下文原生是「左下原点、y 向上」，而元素坐标是「左上原点、y 向下」（与 SwiftUI 画布一致）。
+    /// 所以这里把 CTM 整体翻成 y 向下、并给上下文打上 flipped 标记，元素坐标才能原样使用；
+    /// 底图与马赛克叠加图必须用 `respectFlipped: true` 绘制，否则会上下颠倒（DEV-053）。
     private static func exportedImage(image: NSImage, elements: [CanvasElement]) -> NSImage {
         guard let baseCG = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             return image
@@ -1059,19 +1139,28 @@ struct EditorView: View {
                                          colorSpaceName: .deviceRGB,
                                          bytesPerRow: 0,
                                          bitsPerPixel: 0),
-              let context = NSGraphicsContext(bitmapImageRep: rep) else {
+              let bitmapContext = NSGraphicsContext(bitmapImageRep: rep) else {
             return image
         }
 
+        // 同一个 CGContext 再包一层 flipped=true 的 NSGraphicsContext：
+        // flipped 标记让 AppKit 的文字/图片绘制按 y 向下理解矩形，CTM 翻转让坐标真正变成 y 向下。
+        let cg = bitmapContext.cgContext
+        let context = NSGraphicsContext(cgContext: cg, flipped: true)
+
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = context
-        context.cgContext.scaleBy(x: pixelScale, y: pixelScale)
+        cg.scaleBy(x: pixelScale, y: pixelScale)
+        cg.translateBy(x: 0, y: image.size.height)
+        cg.scaleBy(x: 1, y: -1)
 
         NSColor.black.setFill()
         NSBezierPath(rect: NSRect(origin: .zero, size: image.size)).fill()
-        image.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1)
+        image.draw(in: NSRect(origin: .zero, size: image.size), from: .zero,
+                   operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
 
-        for element in elements {
+        // 层序与预览的 drawElements 必须完全一致：非气泡在下、气泡永远在上（见 zOrdered）
+        for element in Self.zOrdered(elements) {
             switch element {
             case .stroke(let s):
                 let path = NSBezierPath()
@@ -1100,7 +1189,7 @@ struct EditorView: View {
             }
         }
 
-        context.flushGraphics()
+        cg.flush()
         NSGraphicsContext.restoreGraphicsState()
 
         let result = NSImage(size: NSSize(width: baseCG.width, height: baseCG.height))
@@ -1115,12 +1204,11 @@ struct EditorView: View {
         let elements = doc.elements
         return await Task.detached(priority: .userInitiated) {
             let exported = Self.exportedImage(image: image, elements: elements)
-            guard let data = exported.pngData,
-                  let rep = NSBitmapImageRep(data: data) else {
+            guard let data = exported.pngData else {
                 ZSLog("export png encode failed")
                 return nil
             }
-            ZSLog("export png: \(rep.pixelsWide)x\(rep.pixelsHigh)px data=\(data.count)")
+            ZSLog("export png: \(Int(exported.size.width))x\(Int(exported.size.height))px data=\(data.count)")
             return data
         }.value
     }
@@ -1177,8 +1265,9 @@ struct EditorView: View {
         }
         NSGraphicsContext.saveGraphicsState()
         clip.addClip()
+        // 导出上下文是 y 向下（DEV-053），叠加图必须 respectFlipped 才不会被画反
         overlay.draw(in: fullRect, from: NSRect(origin: .zero, size: overlay.size),
-                     operation: .sourceOver, fraction: 1)
+                     operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         NSGraphicsContext.restoreGraphicsState()
     }
 
@@ -1283,10 +1372,17 @@ struct EditorView: View {
 // MARK: - 辅助
 
 extension NSImage {
+    /// 直接走 CGImageDestination 编码：避免 `tiffRepresentation` + `NSBitmapImageRep(data:)`
+    /// 在导出峰值时多出两份全尺寸位图（5K 截图可省 100MB+）。
     var pngData: Data? {
-        guard let tiff = tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff) else { return nil }
-        return rep.representation(using: .png, properties: [:])
+        guard let cgImage = cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data, UTType.png.identifier as CFString, 1, nil
+        ) else { return nil }
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
     }
 }
 

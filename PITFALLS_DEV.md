@@ -234,3 +234,38 @@
 - **Pitfall:** 改系统「自然滚动」偏好(`com.apple.swipescrolldirection`)会把触控板一起反转;在 CGEventTap 里不区分来源,两指滚动也会被翻转;不排除 `eventSourceUnixProcessID != 0` 的事件,会和其他滚动工具(或驱动软件)叠加成双重反转。把 `DeltaAxis` 取反后立即读回 `PointDelta` 会发现系统已按倍数重算;若先写 Point/FixedPt 再写 DeltaAxis,取反结果被覆盖,方向偶发不生效。
 - **Cause:** 触控板与妙控鼠标的 scrollWheel 恒为 `scrollWheelEventIsContinuous == 1`,传统滚轮鼠标为 0;手势/惯性阶段的事件同样进 tap。`CGEventSetIntegerValueField(kCGScrollWheelEventDeltaAxis1)` 会让 macOS 内部重算 `FixedPtDelta`(1x)与 `PointDelta`(实测合成 line 事件是 10x),覆盖顺序决定最终增量。
 - **Prevention:** 只对 `continuous == 0 && scrollPhase == 0 && momentumPhase == 0 && pid == 0` 的事件取反,垂直/水平分别处理 axis1/axis2;写字段顺序固定为 `DeltaAxis → FixedPtDelta → PointDelta`(后写保住高精度滚轮的加速度),实测取反后三个字段同号且量级不变。tap 需辅助功能权限:沿用 `DockClickMinimizer` 的独立线程 runloop + 2s 重试建 tap(授权后无需重启),布局校验用 `ZEROFLOW_SCROLL_DEBUG=1` 打印 `continuous/phase/momentum/pid/增量`,触控板事件应全部是 continuous=1。
+
+## DEV-047: 剪贴板图片不要用 `NSImage(contentsOf:)` 全量解码做缩略图/预览
+- **Pitfall:** 列表行只要 22pt 图,却对历史图片整张 `NSImage(contentsOf:)` 解码并放进无上限 `NSCache`;一张 2940×1912 的剪贴板 PNG 就多出 20+MB `Image IO` 脏页,面板关闭后仍常驻(实测 60MB,其中 Image IO 27MB)。`ClipboardMonitor` 只是读像素尺寸也用 `NSBitmapImageRep(data:)`,同样触发整张解码。
+- **Cause:** `NSImage` 是惰性容器,一旦被 SwiftUI 渲染就按原尺寸建立位图;`Image(nsImage:).resizable()` 不会阻止这次全尺寸解码。尺寸信息在文件头里,不需要像素数据。
+- **Prevention:** 用 ImageIO 按用途出图:`CGImageSourceCreateWithURL` + `CGImageSourceCreateThumbnailAtIndex`(列表 `maxPixelSize` 64、预览 1024,`CreateThumbnailFromImageAlways`),代价按 `宽×高×4` 记入带 `totalCostLimit` 的 `NSCache`;读尺寸用 `CGImageSourceCopyPropertiesAtIndex` 的 `kCGImagePropertyPixelWidth/Height`,不要构造 `NSBitmapImageRep`。缩略图上限取 `min(maxPixelSize, 原图长边)`,避免小图被放大。
+
+## DEV-048: tap 安装成功后必须 invalidate 2s 重试定时器
+- **Pitfall:** 五个 CGEventTap 服务都在 tap 线程 runloop 上常驻一个 2s 重复 `CFRunLoopTimer` 兜底重试;tap 一次装成功后定时器仍在每 2s 唤醒一次 runloop(回调里发现 `eventTap != nil` 直接返回),造成无意义空闲唤醒。
+- **Cause:** `runTapLoop` 先 `installTap` 再 `installRetryTimer`,`CFRunLoopTimerCreate` 的重复间隔不会因 tap 已存在而自动停。
+- **Prevention:** 用属性保存 `retryTimer`;`installTap` 成功后(与置 `eventTap` 同一把锁内)取出并清空,再 `CFRunLoopTimerInvalidate`;`installRetryTimer` 在 `eventTap != nil` 或定时器已存在时直接返回,创建后若 `isRunning` 已为 false 也要 invalidate;`stop()` 里连同 tap 一起 invalidate。这样只有「创建失败」期间才保留 2s 重试。
+
+## DEV-049: 导出 PNG 走 `tiffRepresentation` + `NSBitmapImageRep` 会叠三份全尺寸位图
+- **Pitfall:** `NSImage.pngData` 用 `tiffRepresentation` → `NSBitmapImageRep(data:)` → `representation(using: .png)` 编码时,源位图之外又临时生成 TIFF 数据和第二份解码位图;5K 截图(5120×2880 RGBA,单份≈56MB)实测编码峰值多出约 230MB,而实际 PNG 只有 0.3MB。`encodeExportInBackground` 里再 `NSBitmapImageRep(data:)` 仅为打日志,又多一份全图解码。
+- **Cause:** AppKit 的 TIFF 中转是「先序列化再解码」的旧路径,`representation(using:)` 内部还会复制;这些临时对象都按整图尺寸分配。
+- **Prevention:** 直接 `cgImage(forProposedRect:)` 取底图,用 `CGImageDestinationCreateWithData` + `CGImageDestinationAddImage` + `CGImageDestinationFinalize` 编码(实测同一 5K 图峰值 230MB→68MB);日志尺寸从 `NSImage.size`(导出图按像素 1:1 建)取,别再为日志解码整张 PNG。
+
+## DEV-050: 数据监控的 `@ObservedObject` 要下移到对应卡片,别挂在整个面板内容视图
+- **Pitfall:** `NotchContentView` 顶层 `@ObservedObject` 同时观察系统资源/正在播放,2s 采样一更新就重算整个内容视图,连带日历月网格与全部布局;实际只有一个模块在显示。
+- **Cause:** SwiftUI 的依赖跟踪以「声明了 `@ObservedObject` 的 View」为单位,顶层对象变化会让整个 `body` 失效,与当前显示哪个模块无关。
+- **Prevention:** 顶层只放真正跨模块的依赖(日历 model);给资源/音乐各包一个 `@ObservedObject` 的宿主 View(`ResourceCardHost` / `MusicCardHost`),把该模块的列内容放在宿主闭包里。采样更新只重算宿主子树,日历月网格不参与。
+
+## DEV-051: 历史异步加载后,已弹出的面板还持有加载前的快照
+- **Pitfall:** 剪贴板历史改后台加载后,`ClipboardPanelController.show()` 里的 `ClipboardViewModel(items: store.items)` 是在加载完成前取的快照(首次打开实测 `items=0`,列表空白且不会再变),因为面板不会自动重读 store。
+- **Cause:** view model 的 `items` 是值拷贝,`ClipboardHistoryStore.items` 后续的 `@Published` 更新不会传到模型。
+- **Prevention:** 面板 `observe(model)` 时同时订阅 `ClipboardHistoryStore.shared.$items`(`.dropFirst()`),把新数组写回 `model.items`、夹紧 `selectedIndex`、清掉已失效的 `previewItem`;首次从空变非空时再 `applyFrame` 重算面板尺寸。异步 loader 侧则需要在完成前缓冲 `insert`,并让 `clear()` 递增 generation 作废在途加载。
+
+## DEV-052: 事件监听器 token 不能存进 SwiftUI `@State`——会与 StoredLocation 组成自持环
+- **Pitfall:** 编辑页把 `NSEvent.addLocalMonitorForEvents` 返回的 token 存在 `@State private var keyboardMonitor: Any?`,`onDisappear` 里也 `NSEvent.removeMonitor` 并置 nil,但每开关一次编辑页仍常驻约 120MB(5K 底图)。实测 200 次循环 footprint 单调上涨,`EditDocument deinit` 一次都不打;`leaks` 报 `Swift._ContiguousArrayStorage<Optional<Any>>` → `_NSLocalEventObserver` → `__NSMallocBlock__` → `Closure context` → `SwiftUI.StoredLocation<Optional<Any>>` 又指回数组的 ROOT CYCLE,`EditDocument`/`NSImage` 挂在 closure context 下。
+- **Cause:** monitor 的 block 捕获了整个 `EditorView` 值(含 `@StateObject doc` → 底图),而 SwiftUI 把 `@State` 的存储放在 `StoredLocation.savedValues` 里;token 与 observer/block 互相引用后,即便视图已消失、`removeMonitor` 已调用,`StoredLocation` 仍被环自持,没有外部入口能把整串打断。
+- **Prevention:** 监听器 token 的持有者放到 SwiftUI 状态之外:用单例 `EditorKeyMonitor.shared` 存 `monitor`,视图 `onAppear` 调 `install(handler:)`(内部先移除旧的)、`onDisappear` 调 `removeAll()`;窗口关闭路径(`CaptureCoordinator.windowWillClose`)再兜一次 `removeAll()`。修后同一压测 10 次循环 footprint 12.6→31.9MB 后完全走平,每轮 `EditDocument deinit` 均触发。同理检查其他 `@State eventMonitor`(如 `ShortcutRecorderView`);调试用 `ZEROFLOW_MEM_DEBUG=1`(30s footprint tick)与 `ZEROFLOW_MEM_CYCLE=<notch|clipboard|switcher|editor>:<count>[:openMs[:closeMs]]`(`ZEROFLOW_MEM_CYCLE_EXIT=1` 跑完退出),看 `MEM cycle`/`MEM deinit` 日志判断是「首用缓存一次性抬升」还是「每轮都漏」。
+
+## DEV-053: 导出画布必须把上下文翻成「左上原点 y 向下」,否则标注相对底图上下镜像
+- **Pitfall:** 编辑页里画的框/线/气泡/马赛克,保存或复制出来的 PNG 里位置不对——整体像是「错位」:在图片中间偏上加的框,导出后跑到中间偏下(实测 2560×1440 截图,画布拖拽得到图像坐标 y=333.8..473.5,导出后落在 y=242..390.5,即关于水平中线的镜像)。底图本身是正的,只有标注层被翻。
+- **Cause:** 元素一律存「图像坐标:原点左上、y 向下」(与 SwiftUI 画布一致),但 `exportedImage` 用的是 `NSGraphicsContext(bitmapImageRep:)`,位图上下文原生是「左下原点、y 向上」且 `isFlipped == false`;`NSBezierPath(rect:)`/`move(to:)` 直接吃图像坐标就被按 y 向上解释,整层上下镜像。只居中对称的元素(正好在垂直正中、横跨全高的框)看不出问题,所以很容易误判成「位置漂移」。
+- **Prevention:** 导出时把 CTM 整体翻成 y 向下,并给上下文打上 flipped 标记:`let cg = bitmap.cgContext; let ctx = NSGraphicsContext(cgContext: cg, flipped: true)`,`cg.scaleBy(pixelScale)` 后再 `cg.translateBy(x: 0, y: image.size.height)` + `cg.scaleBy(x: 1, y: -1)`。翻转后 `NSBezierPath` 的几何坐标可直接用图像坐标,`NSAttributedString.draw(in:)` 仍正向且顶部对齐;但**图片必须显式 `respectFlipped: true`**(`image.draw(in:from:operation:fraction:respectFlipped:hints:)`),否则底图和马赛克叠加图会被画反——`drawMosaicIntoCanvas` 里的 `overlay.draw(...)` 同样要加。收尾用 `cg.flush()`(`flushGraphics()` 走的是原 rep 上下文)。核对方式:造一张「顶部一条红带」的底图 + 左上角一个框,导出后从最终 PNG 解码回来按行打印 ASCII 色块,别只盯着预览。

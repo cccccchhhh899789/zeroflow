@@ -49,6 +49,8 @@ xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow -configuration Release -
 | `ZEROFLOW_FAKE_PERMISSION=1` | 跳过真实权限检测(视为已授权) |
 | `ZEROFLOW_CLIPBOARD_DEBUG=1` | 启动 1.5s 后忽略开关直接弹出剪贴板面板(用于验证定位/展开/键盘链路);`=preview` 额外自动展开首条预览 |
 | `ZEROFLOW_SCROLL_DEBUG=1` | 限流打印滚轮事件的 `continuous/phase/momentum/pid/增量`,真机核对鼠标被翻转、触控板原样放行 |
+| `ZEROFLOW_MEM_DEBUG=1` | 每 30s 打印一次 `phys_footprint/resident/compressed/malloc`(对象 deinit 计数也需此开关或 `ZEROFLOW_MEM_CYCLE`) |
+| `ZEROFLOW_MEM_CYCLE=<feature>:<count>[:openMs[:closeMs]]` | 自动开关某功能 N 次并逐轮打 footprint:`notch`(需配 `ZEROFLOW_NOTCH_FAKE=1`)/ `clipboard` / `switcher` / `editor`;`ZEROFLOW_MEM_CYCLE_EXIT=1` 跑完退出 |
 
 ## 项目架构
 
@@ -71,6 +73,8 @@ SwiftUI 视图 + AppKit/CG/AX(含私有 API dlsym 桥)服务层 + UserDefaults/A
 - `CanvasElement` 4 case:stroke / bubble / shape / mosaic;仅 bubble / shape 可选中、移动、缩放、删除。
 - 任何修改前先 `snapshotBeforeChange()`(撤销/重做栈上限 50);**BubbleElement / ShapeElement 的 id 不可换**,重设状态须 `init(id:)` 沿用原 id,否则选中/拖动簿记全失效。
 - 马赛克:画布绘制、临时笔划、导出共用 `MosaicOverlayCache`(按半径缓存像素化叠加图),改绘制时保持三处一致。
+- **层序**是两段式(不是纯添加顺序):底层 = stroke/shape/mosaic 按 `elements` 数组顺序;顶层 = bubble **永远**压在底层之上、气泡之间按数组顺序。唯一实现是 `EditorView.zOrdered(_:)`,画布 `drawElements`、命中测试 `element(at:)`、拖拽控点、导出 `exportedImage` 四处都走它,不要各自遍历 `doc.elements`。
+- 临时笔划(tempStroke/tempShape/tempMosaic)画在底层末尾、气泡之下(所见即所得);选中控点由 `drawSelectionOverlay` 在所有元素之后单独绘制,否则被上层压住就拖不动。
 - `exportedImage()` 用 AppKit 按原图尺寸重绘、不依赖视图层级,改绘制逻辑必须同步它。
 
 ### 设置与工程
@@ -108,6 +112,7 @@ SwiftUI 视图 + AppKit/CG/AX(含私有 API dlsym 桥)服务层 + UserDefaults/A
 | 文件 | 职责 |
 |---|---|
 | `AccessibilityPermission.swift` | 辅助功能权限检测与引导跳系统设置 |
+| `AppIconCache.swift` | App 图标降采样缓存：统一 128×128 单表示位图（NSCache），避免整套多尺寸图标常驻 |
 | `AXWindow.swift` | AX 窗口元素查找:`_AXUIElementGetWindow` 精确匹配(禁 bounds 模糊兜底)、remote-token 暴力枚举 |
 | `CalendarService.swift` | EventKit 门面:授权状态/请求(macOS 14 全量)、区间日程查询(未授权返回 [],后台线程调用) |
 | `CaptureCoordinator.swift` | 截图流程协调:权限→遮罩→捕获→编辑页,`isActive` 防重入 |

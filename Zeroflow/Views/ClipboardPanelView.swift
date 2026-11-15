@@ -47,6 +47,8 @@ final class ClipboardViewModel: ObservableObject {
         self.items = items
     }
 
+    deinit { MemoryProbe.noteDeinit("ClipboardViewModel") }
+
     var filteredItems: [ClipboardItem] {
         let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !keyword.isEmpty else { return items }
@@ -227,7 +229,7 @@ struct ClipboardPanelView: View {
                 .foregroundColor(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .image:
-            if let image = ClipboardHistoryStore.shared.image(for: item) {
+            if let image = ClipboardHistoryStore.shared.thumbnail(for: item) {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -335,7 +337,7 @@ struct ClipboardPanelView: View {
                     .padding(12)
             }
         case .image:
-            if let image = ClipboardHistoryStore.shared.image(for: item) {
+            if let image = ClipboardHistoryStore.shared.previewImage(for: item) {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.high)

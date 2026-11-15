@@ -23,6 +23,8 @@ final class NotchCalendarViewModel: ObservableObject {
     private var monthGen = 0
     private var dayGen = 0
 
+    deinit { MemoryProbe.noteDeinit("NotchCalendarViewModel") }
+
     /// 日历与本地化随设置语言变化（跟随系统/zh/en/ja）
     var calendar: Calendar { SettingsStore.shared.appLanguage.locale.calendar }
 
@@ -1817,6 +1819,8 @@ private final class NotchShapeContainerView: NSView {
     private let backdrop: NSView?
     /// 当前形状外包络宽（插件每帧经 applyProfile 更新；nil = 退化为整宽刘海形）
     private var profile: (top: CGFloat, neck: CGFloat, bottom: CGFloat)?
+
+    deinit { MemoryProbe.noteDeinit("NotchShapeContainerView") }
 
     /// initialSize：创建时用已知面板终尺寸立即生成遮罩路径，
     /// 避免首次 orderFront 在 layout() 之前露出一帧方形内容

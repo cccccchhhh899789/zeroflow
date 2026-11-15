@@ -47,6 +47,8 @@ final class ClipboardViewModel: ObservableObject {
         self.items = items
     }
 
+    deinit { MemoryProbe.noteDeinit("ClipboardViewModel") }
+
     var filteredItems: [ClipboardItem] {
         let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !keyword.isEmpty else { return items }

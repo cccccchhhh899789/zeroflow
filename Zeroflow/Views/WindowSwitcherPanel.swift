@@ -116,6 +116,8 @@ struct WindowSwitcherGridView: View {
 final class WindowSwitcherPanel: NSPanel {
     private let container: PanelHostingContainer<WindowSwitcherGridView>
 
+    deinit { MemoryProbe.noteDeinit("WindowSwitcherPanel") }
+
     init(model: WindowSwitcherViewModel,
          glassBackground: Bool,
          onSelect: @escaping (CGWindowID) -> Void,

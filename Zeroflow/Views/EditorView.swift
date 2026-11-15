@@ -3,6 +3,31 @@ import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 
+/// 编辑页键盘监听器的持有者。必须放在 SwiftUI `@State` 之外：
+/// monitor 的 block 捕获整个 EditorView（含 `@StateObject` doc → 底图），
+/// 若 token 存在 `@State` 里，SwiftUI 的 StoredLocation 会与 observer 组成自持环，
+/// 编辑页关闭后整张图都释放不掉（DEV-052）。
+final class EditorKeyMonitor {
+    static let shared = EditorKeyMonitor()
+    private var monitor: Any?
+
+    private init() {}
+
+    var isInstalled: Bool { monitor != nil }
+
+    func install(_ handler: @escaping (NSEvent) -> NSEvent?) {
+        removeAll()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: handler)
+    }
+
+    func removeAll() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+}
+
 /// 编辑页主视图：画布 + 底部工具栏
 struct EditorView: View {
     @StateObject private var doc: EditDocument
@@ -94,16 +119,19 @@ struct EditorView: View {
             installKeyboardMonitor()
         }
         .onDisappear {
+            if MemoryProbe.isEnabled {
+                ZSLog("MEM editor onDisappear monitor=\(EditorKeyMonitor.shared.isInstalled)")
+            }
             removeKeyboardMonitor()
         }
     }
 
     // MARK: - 键盘快捷键
 
-    @State private var keyboardMonitor: Any?
-
     private func installKeyboardMonitor() {
-        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        // 监听器 token 不能存进 @State：block 捕获整个 EditorView（含 @StateObject doc），
+        // @State 又持有 monitor，会形成自持环，编辑页关闭后底图永远释放不掉（DEV-052）。
+        EditorKeyMonitor.shared.install { event in
             let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
             // 正在编辑标注文字：除 Esc（提交并退出编辑）外，全部放行给文本编辑器
             if self.editingBubbleID != nil {
@@ -148,9 +176,10 @@ struct EditorView: View {
     }
 
     private func removeKeyboardMonitor() {
-        if let monitor = keyboardMonitor {
-            NSEvent.removeMonitor(monitor)
+        if MemoryProbe.isEnabled {
+            ZSLog("MEM editor removeKeyboardMonitor had=\(EditorKeyMonitor.shared.isInstalled)")
         }
+        EditorKeyMonitor.shared.removeAll()
     }
 
     private var canvasArea: some View {

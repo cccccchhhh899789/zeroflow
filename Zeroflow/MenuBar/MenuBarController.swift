@@ -127,6 +127,10 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSWindowDelegate
                 WindowActivator.shared.focus(window: w)
             }
         }
+
+        // 内存探针 / 循环压测（默认关闭，见 MemoryProbe / MemoryCycleRunner）
+        MemoryProbe.startIfNeeded()
+        MemoryCycleRunner.startIfNeeded()
     }
 
     private func setupMenuBar() {

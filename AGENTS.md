@@ -49,6 +49,8 @@ xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow -configuration Release -
 | `ZEROFLOW_FAKE_PERMISSION=1` | 跳过真实权限检测(视为已授权) |
 | `ZEROFLOW_CLIPBOARD_DEBUG=1` | 启动 1.5s 后忽略开关直接弹出剪贴板面板(用于验证定位/展开/键盘链路);`=preview` 额外自动展开首条预览 |
 | `ZEROFLOW_SCROLL_DEBUG=1` | 限流打印滚轮事件的 `continuous/phase/momentum/pid/增量`,真机核对鼠标被翻转、触控板原样放行 |
+| `ZEROFLOW_MEM_DEBUG=1` | 每 30s 打印一次 `phys_footprint/resident/compressed/malloc`(对象 deinit 计数也需此开关或 `ZEROFLOW_MEM_CYCLE`) |
+| `ZEROFLOW_MEM_CYCLE=<feature>:<count>[:openMs[:closeMs]]` | 自动开关某功能 N 次并逐轮打 footprint:`notch`(需配 `ZEROFLOW_NOTCH_FAKE=1`)/ `clipboard` / `switcher` / `editor`;`ZEROFLOW_MEM_CYCLE_EXIT=1` 跑完退出 |
 
 ## 项目架构
 

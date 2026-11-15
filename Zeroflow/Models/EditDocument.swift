@@ -126,6 +126,8 @@ final class EditDocument: ObservableObject {
         self.image = image
     }
 
+    deinit { MemoryProbe.noteDeinit("EditDocument") }
+
     @discardableResult
     func snapshotBeforeChange() -> Bool {
         let current = elements

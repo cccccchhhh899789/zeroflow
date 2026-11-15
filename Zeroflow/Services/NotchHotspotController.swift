@@ -458,6 +458,12 @@ final class NotchHotspotController {
         lock.unlock()
     }
 
+    // MARK: - 调试：内存循环
+
+    func debugCyclePresent() { openNow() }
+
+    func debugCycleHide() { hidePanel(reason: "mem-cycle") }
+
     /// 单击热区立即弹出（无需等悬停延时）
     private func openNow() {
         lock.lock()

@@ -335,6 +335,12 @@ final class CommandTabSwitcher {
         return sessionActive && sessionGeneration == generation
     }
 
+    // MARK: - 调试：内存循环
+
+    func debugCycleBegin() { beginSession(backward: false) }
+
+    func debugCycleEnd() { cancelSession() }
+
     private func beginSession(backward: Bool) {
         lock.lock()
         sessionActive = true

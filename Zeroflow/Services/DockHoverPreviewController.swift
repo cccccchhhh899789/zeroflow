@@ -25,8 +25,8 @@ import CoreGraphics
 /// - 窗口列表 = `WindowList.shared.enumerate()` 按 bundleID 过滤，与 ⌘⇥ 切换器**完全同源**
 ///   （含最小化与其他 Space 的窗口，不做特殊处理）；无窗口 app 不弹、无占位卡。
 /// - 状态机：idle →(进入 Dock 边缘/命中图标)→ pending(延时) → visible；
-///   visible 时鼠标移入面板保活（锚点冻结，图标缩放不跟随），移出 图标∪面板 后按
-///   「收起延迟」隐藏。弹出/收起两个延时都在设置页用滑杆控制
+///   visible 时鼠标移入面板保活（锚点冻结，图标缩放不跟随），移出「图标 / 面板 /
+///   图标→面板走廊」后按「收起延迟」隐藏。弹出/收起两个延时都在设置页用滑杆控制
 ///   （`dockPreviewHoverDelayMs` / `dockPreviewHideDelayMs`），每次调度时现读，即时生效。
 /// - 全局隐藏：任意 mouseDown（放行原生行为）/ Space 切换 / 锁屏睡眠 / 目标 app 退出 /
 ///   Dock 重启 / 任意按键 / 屏幕配置变化。
@@ -41,7 +41,7 @@ final class DockHoverPreviewController {
     static let didChangeNotification = Notification.Name("zeroflow.dockPreviewDidChange")
 
     /// 代码版本标记（只用于日志，排查「改了代码但跑的还是旧二进制」）
-    private static let revision = "2026-11-15.dock-preview-r4"
+    private static let revision = "2026-11-15.dock-preview-r5"
 
     private static let dockBundleID = "com.apple.dock"
     private static let dockItemRole = "AXApplicationDockItem"
@@ -489,13 +489,15 @@ final class DockHoverPreviewController {
                 setHoverItem(entry.id)
                 bumpHideGen() // 取消可能挂着的宽限隐藏，避免它杀掉在途 show
                 // 换目标时**不**立刻收掉旧面板：路过/蹭到隔壁图标（鼠标去面板途中很常见）
-                // 不该把面板打掉。新目标到期后由 present 原位换内容；解析失败也只在指针
-                // 已经离开 图标∪面板 时才会真收（见 failResolve）。
+                // 不该把面板打掉。新目标到期后由 present 原位换内容；解析失败（典型：隔壁
+                // 图标没有窗口）时由 failResolve 按保活区决定去留——指针已离开 图标/面板/走廊
+                // 就真收（见 isInKeepAliveRegion）。
                 if Self.debug { ZSLog("DockHoverPreview: switch by cache pt=\(point) -> id=\(entry.id)") }
                 scheduleShow(after: hoverDelay()) // 相邻图标：延时后原位换内容
                 return
             }
-            // 面板显示中：仍在 (图标 ∪ 面板) 外扩 keepAliveInset 内 → 保活
+            // 面板显示中：仍在「图标 / 面板 / 图标→面板走廊」保活区内 → 保活
+            // （不能用 图标∪面板 的包围矩形，否则隔壁图标也在里面，见 isInKeepAliveRegion）
             let keepAlive = isInKeepAliveRegion(point, anchor: anchorFrame, panel: panelFrame)
             if keepAlive != lastKeepAliveLogged {
                 lastKeepAliveLogged = keepAlive
@@ -631,15 +633,18 @@ final class DockHoverPreviewController {
         lock.unlock()
     }
 
-    /// 保活区：图标与面板各自外扩 keepAliveInset，再加上两者的并集（并集天然包含两者
-    /// 之间的走廊）。图标与面板之间即使有缝（放大图标缩回、锚点冻结在旧坐标）也不会掉出去。
+    /// 保活区：图标自身 ∪ 面板自身（各外扩 keepAliveInset），再加上「图标 → 面板」走廊。
+    ///
+    /// **不能用 `anchor.union(panel)` 的包围矩形**：底部 Dock 下它是一个横跨「图标最左 →
+    /// 面板最右」的大矩形，横向远宽于图标本身，会把整条 Dock 的邻域一起吞掉——指针明明
+    /// 停在隔壁图标上也被判成「还在原地」，于是换到**无窗口图标**时 `failResolve` 走
+    /// 「keep panel」分支，旧面板永远不收（DEV-065）。
+    /// 图标与面板之间即使有缝（放大图标缩回、锚点冻结在旧坐标）也由走廊覆盖，不需要并集。
     private func isInKeepAliveRegion(_ point: CGPoint, anchor: CGRect?, panel: CGRect?) -> Bool {
         let inflate = Self.keepAliveInset
         if let anchor, anchor.insetBy(dx: -inflate, dy: -inflate).contains(point) { return true }
         if let panel, panel.insetBy(dx: -inflate, dy: -inflate).contains(point) { return true }
-        if let anchor, let panel,
-           anchor.union(panel).insetBy(dx: -inflate, dy: -inflate).contains(point) { return true }
-        return false
+        return isInTransitCorridor(point, anchor: anchor, panel: panel)
     }
 
     /// 「图标 → 面板」走廊：沿面板朝向轴从图标边缘延伸到面板边缘，横截面取图标自身跨度
@@ -667,7 +672,7 @@ final class DockHoverPreviewController {
         return corridor.insetBy(dx: -inflate, dy: -inflate).contains(point)
     }
 
-    /// 宽限隐藏：移出 图标∪面板(外扩) 后按「收起延迟」仍在 visible 且无在途 show 才真正隐藏。
+    /// 宽限隐藏：移出「图标 / 面板 / 图标→面板走廊」(外扩) 后按「收起延迟」仍在 visible 且无在途 show 才真正隐藏。
     /// 期间回到保活区（bumpHideGen）或调度了新 show（pendingShowGen 置位/作废本 hide）都会取消。
     /// 延迟每次调用时现读设置，改滑杆即时生效（无需重启）。
     private func scheduleHideAfterGrace() {
@@ -820,9 +825,11 @@ final class DockHoverPreviewController {
         let anchor = currentItemTL
         let panel = panelFrameTL
         lock.unlock()
-        // 面板已经开着、指针仍在 图标∪面板 保活区里（正往面板上走，或蹭到隔壁图标后继续
-        // 上行）→ 这只是一次「换目标」没解析出东西，不该把当前面板收掉：作废这次 show，
+        // 面板已经开着、指针仍在保活区里（正往面板上走，或蹭到隔壁图标后继续上行）→
+        // 这只是一次「换目标」没解析出东西，不该把当前面板收掉：作废这次 show，
         // 面板与状态原样保留，去留交给保活判定/收起延迟。
+        // 指针停在**隔壁图标**上（保活区外，典型：那个图标没有窗口）则走下面的收起分支，
+        // 旧面板不能赖着不走。
         if wasVisible, isInKeepAliveRegion(point, anchor: anchor, panel: panel) {
             lock.lock()
             if g == self.showGen {

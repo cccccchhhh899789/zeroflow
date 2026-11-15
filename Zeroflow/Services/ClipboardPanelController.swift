@@ -137,8 +137,11 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         // 释放 SwiftUI 内容树与液态玻璃背景；下次弹出由 show() 重建
         panel.contentView = nil
         model = nil
+        // 关窗即丢解码后的缩略图/预览位图，不留常驻（面板再开时按需重新读小文件）
+        ClipboardHistoryStore.shared.purgeMemoryCaches()
         isDismissing = false
         cancellables.removeAll()
+        if MemoryProbe.isEnabled { MemoryProbe.log("clipboard-dismiss") }
         ZSLog("clipboard panel dismissed")
         if didActivateApp {
             didActivateApp = false

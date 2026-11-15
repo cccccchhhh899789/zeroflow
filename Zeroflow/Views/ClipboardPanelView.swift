@@ -169,7 +169,11 @@ struct ClipboardPanelView: View {
     private var list: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 2) {
+                // 必须 Lazy：普通 VStack 会把历史里所有行一次性建出来，
+                // 每行的缩略图（旧实现是整张解码大 PNG）跟着全部跑一遍（DEV-047）
+                // 必须 Lazy：普通 VStack 会把历史里所有行一次性建出来，
+                // 每行的缩略图都跟着跑一遍（历史里图片一多就是成百次解码）
+                LazyVStack(spacing: 2) {
                     ForEach(Array(model.filteredItems.enumerated()), id: \.element.id) { index, item in
                         row(item: item, index: index)
                             .id(item.id)

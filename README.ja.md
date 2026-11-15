@@ -6,6 +6,8 @@ macOS ネイティブの軽量ユーティリティ集。スクリーンショ�
 
 無料・広告やポップアップなし・サードパーティ製ライブラリ不使用。パッケージは小さく、起動は速く、常駐メモリもわずかです。
 
+ウィンドウ切り替えツールの AltTab やクリップボード管理ツールの Maccy と比較して、ZeroFlow は数倍の機能を備えながら、メモリ使用量を大幅に抑えています。起動直後はもちろん、長時間使用した後でもその差は変わりません。ぜひ実際にダウンロードして、その違いを比較してみてください。
+
 [![macOS 14.0+](https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple&logoColor=white)](https://github.com/hellolio/zeroflow)
 [![Latest release](https://img.shields.io/github/v/release/hellolio/zeroflow)](https://github.com/hellolio/zeroflow/releases/latest)
 [![License: MIT](https://img.shields.io/github/license/hellolio/zeroflow)](LICENSE)
@@ -77,7 +79,7 @@ zeroflow/
 ```
 
 ## ロードマップ
-
+- [ ] パフォーマンスの継続的な改善（特にメモリ使用量の削減）と、操作ロジックおよびユーザー体験の最適化。
 
 ## ライセンス
 

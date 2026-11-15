@@ -73,6 +73,8 @@ SwiftUI 视图 + AppKit/CG/AX(含私有 API dlsym 桥)服务层 + UserDefaults/A
 - `CanvasElement` 4 case:stroke / bubble / shape / mosaic;仅 bubble / shape 可选中、移动、缩放、删除。
 - 任何修改前先 `snapshotBeforeChange()`(撤销/重做栈上限 50);**BubbleElement / ShapeElement 的 id 不可换**,重设状态须 `init(id:)` 沿用原 id,否则选中/拖动簿记全失效。
 - 马赛克:画布绘制、临时笔划、导出共用 `MosaicOverlayCache`(按半径缓存像素化叠加图),改绘制时保持三处一致。
+- **层序**是两段式(不是纯添加顺序):底层 = stroke/shape/mosaic 按 `elements` 数组顺序;顶层 = bubble **永远**压在底层之上、气泡之间按数组顺序。唯一实现是 `EditorView.zOrdered(_:)`,画布 `drawElements`、命中测试 `element(at:)`、拖拽控点、导出 `exportedImage` 四处都走它,不要各自遍历 `doc.elements`。
+- 临时笔划(tempStroke/tempShape/tempMosaic)画在底层末尾、气泡之下(所见即所得);选中控点由 `drawSelectionOverlay` 在所有元素之后单独绘制,否则被上层压住就拖不动。
 - `exportedImage()` 用 AppKit 按原图尺寸重绘、不依赖视图层级,改绘制逻辑必须同步它。
 
 ### 设置与工程

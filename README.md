@@ -8,9 +8,13 @@ Free, no ads or pop-ups, no third-party dependencies. Small download, fast launc
 
 Compared to AltTab (a window switcher) and Maccy (a clipboard manager), ZeroFlow offers several times more functionality while using significantly less memory. This holds true both right after launch and after extended use. Feel free to download all three and see the difference for yourself.
 
-[![macOS 14.0+](https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple&logoColor=white)](https://github.com/hellolio/zeroflow)
+[![Sponsor][SponsorBadge]][SponsorUrl]
 [![Latest release](https://img.shields.io/github/v/release/hellolio/zeroflow)](https://github.com/hellolio/zeroflow/releases/latest)
 [![License: MIT](https://img.shields.io/github/license/hellolio/zeroflow)](LICENSE)
+[![macOS: 14.0+](https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple&logoColor=white)](https://github.com/hellolio/zeroflow)
+
+[SponsorUrl]: https://github.com/sponsors/hellolio
+[SponsorBadge]: https://img.shields.io/github/sponsors/hellolio?style=flat&logo=github&logoColor=white
 
 ## Features
 

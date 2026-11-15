@@ -307,7 +307,7 @@
 ## DEV-060: Dock 预览「鼠标还没走到面板上就消失」——`insetBy` 符号写反，保活区其实是内缩的
 - **Pitfall:** 预览面板弹出后想把鼠标移到面板上点卡片，结果一动就消失，慢一点根本够不到；越快越容易成功。看起来像「收起延迟太短」，调大也治不彻底。
 - **Cause:** 保活判定写的是 `anchorFrame.insetBy(dx: keepAliveInset, dy: keepAliveInset)`——`insetBy` 的**正值是内缩**（外扩要传负值，同文件里 `resolvedItemGateSlack` 就是 `-slack`）。于是保活区比图标/面板各自**小** 6pt，而面板底边离图标顶边只有 2pt：图标上沿到面板下沿之间凭空多出一条 `6 + 2 + 6 = 14pt` 的死带。指针慢速穿过这条死带就会超过 200ms 宽限，面板当场收起。
-- **Prevention:** ① 外扩一律写 `insetBy(dx: -keepAliveInset, ...)`（`NotchHotspotController` 同款写法可对照）；② 除两个矩形各自外扩外，再判一次 `anchor ∪ panel` 的并集（并集天然包含两者之间的走廊），把「图标↔面板有缝」的情况一起兜住；③ `.visible` 时若指针命中「另一个图标」，先用「图标 → 面板」走廊（`isInTransitCorridor`：沿朝向轴从图标边缘延伸到面板边缘、横截面取图标跨度）挡一道——放大 Dock 下缓存几何会整体漂移，上行途中很容易误命中隔壁图标，一旦按「换目标」处理就会 `softHidePanel` 掉刚弹出的面板；④ 弹出/收起两个延时都做成设置页滑杆（`dockPreviewHoverDelayMs` / `dockPreviewHideDelayMs`，后者默认 500ms），每次调度时现读，改滑杆即时生效。
+- **Prevention:** ① 外扩一律写 `insetBy(dx: -keepAliveInset, ...)`（`NotchHotspotController` 同款写法可对照）；② 除两个矩形各自外扩外，再用「图标 → 面板」走廊（`isInTransitCorridor`：沿朝向轴从图标边缘延伸到面板边缘、横截面取图标跨度）兜住两者之间的缝——**不要**改判 `anchor ∪ panel` 的包围矩形，它在底部 Dock 下会横向吞掉整条 Dock 邻域（含所有隔壁图标），导致「移到无窗口图标上旧预览不收」，见 DEV-065；③ `.visible` 时若指针命中「另一个图标」，先用「图标 → 面板」走廊（`isInTransitCorridor`：沿朝向轴从图标边缘延伸到面板边缘、横截面取图标跨度）挡一道——放大 Dock 下缓存几何会整体漂移，上行途中很容易误命中隔壁图标，一旦按「换目标」处理就会 `softHidePanel` 掉刚弹出的面板；④ 弹出/收起两个延时都做成设置页滑杆（`dockPreviewHoverDelayMs` / `dockPreviewHideDelayMs`，后者默认 500ms），每次调度时现读，改滑杆即时生效。
 - **验证:** `defaults write com.zeroflow.app dockPreviewDebug -bool true` 后慢速把指针从图标移到面板：日志不应出现 `hide (left icon+panel region)`；滑杆把「收起延迟」拉到 2000ms 后，离开图标再移回面板应能救回同一个面板。
 
 ## DEV-061: 鼠标去面板途中蹭到隔壁图标 → 当前面板立刻被收掉（「换目标先 softHide」的代价）
@@ -333,3 +333,10 @@
 - **Cause:** ① Dock 开了放大（magnification）时图标在平移，`AXUIElementCopyElementAtPosition` 在动画中途有时只返回通用的 `AXDockItem` 角色（不是 `AXApplicationDockItem`），`isDockItemElement` 判 false → `resolveTarget` 返回 `notDockElement`；② `scheduleResolveRetry` 当时要求「Dock 尚未落位」才重试，而放大动画期间条带是**已落位**的 → 不重试 → `failResolve` 直接 `hidePanel`；③ 缓存快路径同时因为条带是动画中途快照（实测 bbox 在 588/626/661/689 之间反复变化）而漏命中。三者叠加 = 「一次抖动就收面板」。
 - **Prevention:** ① `scheduleResolveRetry` 的门槛从「`isNearDockStrip && !isDockSettled`」放宽为「`isNearDockStrip`」——指针还在 Dock 边带里就说明这次失败是时序竞态，重试预算（0.12s × 10 ≈ 1.2s）内旧面板保持不动，预算用完才真收；② 权威命中同时接受通用角色 `AXDockItem`（`isAnyDockItemElement`，只用于命中、不参与缓存收集，避免分隔符/堆栈污染条带 bbox）；③ 解析日志加 `settled=` 便于区分「隐藏位」与「放大动画」两类竞态。
 - **排查提示:** `DockHoverPreview: started (rev=...)` 会打印代码版本标记——怀疑「改了代码但跑的还是旧二进制」时先看这条；另外 `open` 一个已在运行的 app 只会激活旧进程，**必须**先 `pkill -f "Zeroflow.app/Contents/MacOS/Zeroflow"` 再 `open`。
+
+## DEV-065: Dock 预览「移到没有窗口的图标上，旧预览不消失」——保活区用了 图标∪面板 的包围矩形
+- **Pitfall:** 悬停有窗口的图标 A 弹出预览，指针平移到隔壁**没有窗口**的图标 B 上，A 的预览一直挂着不收；若 B 有窗口则能正常原位换内容。看起来像「无窗口目标没触发收起」，实际是保活判定把 B 也圈了进去。
+- **Cause:** `isInKeepAliveRegion` 除图标/面板各自外扩，还判了 `anchor.union(panel)` 的包围矩形（DEV-060 ② 的旧做法）。底部 Dock 下该矩形横向从「图标最左」跨到「面板最右」，而面板远宽于图标 → 整条 Dock 邻域（含所有隔壁图标）都落在保活区里。于是指针停在 B 上时两条路都卡住：① `.visible` 的 `keepAlive` 为 true，只 `bumpHideGen()`，连权威命中都不再走；② 若先进了换目标分支（缓存命中 B 且不在走廊），`resolveAndShow` 对 B 得到空窗口列表 → `failResolve` 的「keep panel」分支又因保活区命中而保留旧面板。
+- **Prevention:** 保活区改为「图标自身 ∪ 面板自身 ∪ `isInTransitCorridor` 走廊」，**删掉并集分支**：走廊沿朝向轴从图标边缘延伸到面板边缘、横截面只取图标跨度（再外扩 `keepAliveInset`），缝隙照样覆盖，但不会横向吞掉邻域。`failResolve` 复用同一函数，于是「指针停在别的图标上且该目标无窗口」自然落进收起分支——且是立即收，不等收起延迟。
+- **代价:** 从图标**斜向**移向面板角落时可能短暂出走廊，触发一次收起延迟（默认 500ms）；指针进面板后 `bumpHideGen` 取消。观感上是一次可配置延迟，不会闪。
+- **验证:** 悬停有窗口的 A → 平移到隔壁无窗口的 B：日志应出现 `hide (target has no windows)` 而不是 `keep panel, resolve miss (target has no windows)`；平移到有窗口的 C 仍原位换内容；慢速从 A 移向面板仍不掉（DEV-060 的验证照旧通过）。

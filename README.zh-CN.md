@@ -8,9 +8,13 @@ macOS 原生的轻量效率工具集：截图标注、窗口切换、Dock 增强
 
 与 AltTab（窗口切换工具）和 Maccy（剪贴板历史管理工具）相比，ZeroFlow 在功能丰富数倍的情况下，内存占用却远低于两者。无论是刚启动时，还是经过长时间、大量使用后，都能保持更低的内存占用。欢迎大家自行下载体验并进行对比测试。
 
-[![macOS 14.0+](https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple&logoColor=white)](https://github.com/hellolio/zeroflow)
+[![Sponsor][SponsorBadge]][SponsorUrl]
 [![Latest release](https://img.shields.io/github/v/release/hellolio/zeroflow)](https://github.com/hellolio/zeroflow/releases/latest)
 [![License: MIT](https://img.shields.io/github/license/hellolio/zeroflow)](LICENSE)
+[![macOS: 14.0+](https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple&logoColor=white)](https://github.com/hellolio/zeroflow)
+
+[SponsorUrl]: https://github.com/sponsors/hellolio
+[SponsorBadge]: https://img.shields.io/github/sponsors/hellolio?style=flat&logo=github&logoColor=white
 
 ## 功能
 

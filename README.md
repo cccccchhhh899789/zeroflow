@@ -1,73 +1,82 @@
-# zeroflow
+# Zeroflow
 
-一款免费、无弹窗的 macOS 原生的效率小工具，安装包小、低内存占用（截图和缩略图需要一定内存），启动迅速。
+**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
-## 功能
+A native, lightweight macOS utility set: screenshot annotation, window switching, Dock enhancements, clipboard history, and a Dynamic Island — all behind a single menu bar icon.
 
-- 鼠标滚动翻转
-- 全局快捷键 `⌘+⇧+S` 任意时刻截图，支持自定义快捷键
-- `⌘+tab`切换窗口显示缩略图
-- 单击 Dock 图标最小化窗口（可在设置中开启）
-- Dock图标悬停可预览窗口
-- 剪切板历史
-- 灵动岛
-- 访达中支持右键菜单自定义
+Free, no ads or pop-ups, no third-party dependencies. Small download, fast launch, low idle memory.
 
-## TODO list
-- [ ] 灵动岛显示宠物？如果太耗内存就不做
-- [ ] 外接显示器优化（bugfix）
+![macOS 14.0+](https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple&logoColor=white)
+![Release](https://img.shields.io/github/v/release/hellolio/zeroflow)
+![License](https://img.shields.io/github/license/hellolio/zeroflow)
 
-## 下载安装
+## Features
 
-从 [Releases](https://github.com/hellolio/zeroflow/releases) 下载最新的 `Zeroflow-x.x.x.dmg`，打开后将 Zeroflow 拖入「应用程序」。
+| Module | What it does |
+|---|---|
+| Screenshot annotation | `⌘⇧S` to capture anytime, then draw lines, rectangles, circles, text bubbles or mosaic. Undo and redo included; the shortcut is configurable |
+| Window switcher | `⌘⇥` (configurable) switches windows by thumbnail — minimized and off-screen windows included |
+| Dock enhancements | Click the Dock icon to minimize a window; hover it to preview window contents |
+| Clipboard history | `⌘⇧C` (configurable) opens history — search, pick with the arrow keys, paste with Return |
+| Dynamic Island | Hover or click the notch to expand: calendar, system resources (CPU / memory / GPU / disk / network), now playing |
+| Finder context menu | Custom right-click commands in Finder |
+| Scroll direction | Reverses wheel scrolling without affecting trackpad gestures |
 
-> 应用目前未做开发者签名/公证，首次打开时 Gatekeeper 可能提示「已损坏，无法打开」或「无法验证开发者」。任选其一解决：
+## Installation
+
+Download the latest `Zeroflow-x.x.x.dmg` from [Releases](https://github.com/hellolio/zeroflow/releases), open it, and drag Zeroflow into Applications.
+
+> The app is not signed or notarized, so Gatekeeper may block the first launch. Either:
 >
-> - 终端执行 `xattr -cr /Applications/Zeroflow.app` 后再打开；
-> - 或前往 系统设置 → 隐私与安全性 → 找到 Zeroflow 的拦截提示 → 点「仍要打开」。
+> - Run `xattr -cr /Applications/Zeroflow.app` in Terminal, then open it again;
+> - Or open System Settings → Privacy & Security, find the Zeroflow notice, and click "Open Anyway".
 
+## Build
 
-## 构建
-
-前置条件：macOS 14.0+、Xcode 16+。
+Requires macOS 14.0+ and Xcode 16+.
 
 ```bash
-cd zeroflow
 xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow \
-  -configuration Release -derivedDataPath build build
-
+  -configuration Debug -derivedDataPath build -allowProvisioningUpdates build
 open build/Build/Products/Debug/Zeroflow.app
 ```
 
-> 新建源文件放入 `Zeroflow/` 目录即自动纳入编译，无需改 pbxproj。
+- Source files added under `Zeroflow/` are compiled automatically — no `project.pbxproj` edits needed.
+- `-allowProvisioningUpdates` lets Xcode generate the App Group provisioning profile required by the FinderSync extension.
 
-CI（`.github/workflows/build.yml`）：推送/PR 到 main 触发编译检查并上传 app zip artifact；打 `v*` tag 会用 Release 配置构建、打包 DMG 并自动发布到 GitHub Releases。
+CI lives in `.github/workflows/build.yml`: pushes and PRs to `main` run a compile check and upload an app artifact; a `v*` tag builds in Release configuration, packages a DMG, and publishes it to GitHub Releases.
 
-## 技术栈
+## Tech stack
 
-| 项 | 选型 |
+| Area | Choice |
 |---|---|
-| 语言 | Swift 5 |
-| UI | SwiftUI + AppKit |
-| 屏幕捕获 | ScreenCaptureKit（macOS 14+） |
-| 全局热键 | Carbon `RegisterEventHotKey` |
-| 依赖 | 无（单工程） |
-| 最小系统 | macOS 14.0（Sonoma）+ |
+| Language / UI | Swift 5 + SwiftUI + AppKit |
+| Screen capture | ScreenCaptureKit (`SCScreenshotManager`) |
+| Global hotkeys | Carbon `RegisterEventHotKey` (screenshot / clipboard) |
+| Event interception | CGEventTap (`⌘⇥` switcher, scroll reversal, Dock and notch hotspots) |
+| Window thumbnails | SkyLight private API `CGSHWCaptureWindowList` (bridged via `dlsym`; captures minimized and off-screen windows) |
+| System integration | EventKit (calendar), MediaRemote (now playing), Accessibility API |
+| Dependencies | None — single Xcode project |
+| Minimum OS | macOS 14.0 Sonoma |
 
-## 目录结构
+## Project layout
 
 ```
 zeroflow/
-├── Zeroflow.xcodeproj/          # Xcode 工程
-├── Zeroflow/                    # 源码
-│   ├── ZeroflowApp.swift        # 程序入口
-│   ├── MenuBar/                 # 菜单栏控制器
-│   ├── Models/                  # 设置、快捷键、编辑文档模型
-│   ├── Views/                   # 设置页、选区遮罩、编辑页
-│   └── Services/                # 热键、截屏、编辑器协调、日志
-├── 需求文档.md                  # 详细需求
-└── dist/                        # 构建产物副本
+├── Zeroflow.xcodeproj/      # Xcode project
+├── Zeroflow/
+│   ├── ZeroflowApp.swift    # App entry point
+│   ├── MenuBar/             # Menu bar controller
+│   ├── Models/              # Settings, shortcuts, edit document, clipboard models
+│   ├── Views/               # Settings, selection overlay, editor, feature panels
+│   ├── Services/            # Capture, hotkeys, windows, Dock, clipboard, notch panel, Finder
+│   └── Resources/           # Localization strings (Translations.json)
+├── FinderSyncExtension/     # Finder context-menu extension (sandboxed, talks to the app via App Group)
+├── scripts/                 # Extension registration script
+└── .github/workflows/       # CI: compile check and release
 ```
+
+## Roadmap
 
 
 ## License

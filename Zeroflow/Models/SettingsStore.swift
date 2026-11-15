@@ -28,6 +28,7 @@ final class SettingsStore: ObservableObject {
         static let dockClickMinimize = "dockClickMinimize"
         static let dockPreviewEnabled = "dockPreviewEnabled"
         static let dockPreviewHoverDelayMs = "dockPreviewHoverDelayMs"
+        static let dockPreviewHideDelayMs = "dockPreviewHideDelayMs"
         static let dockPreviewGlassBackground = "dockPreviewGlassBackground"
         static let cmdTabSwitcherEnabled = "cmdTabSwitcherEnabled"
         static let windowSwitcherShowWindowlessApps = "windowSwitcherShowWindowlessApps"
@@ -117,6 +118,7 @@ final class SettingsStore: ObservableObject {
             Keys.dockClickMinimize: false,
             Keys.dockPreviewEnabled: false,
             Keys.dockPreviewHoverDelayMs: 300,
+            Keys.dockPreviewHideDelayMs: 500,
             Keys.dockPreviewGlassBackground: true,
             Keys.cmdTabSwitcherEnabled: false,
             Keys.windowSwitcherShowWindowlessApps: true,
@@ -152,6 +154,7 @@ final class SettingsStore: ObservableObject {
         _dockClickMinimize = Published(initialValue: defaults.bool(forKey: Keys.dockClickMinimize))
         _dockPreviewEnabled = Published(initialValue: defaults.bool(forKey: Keys.dockPreviewEnabled))
         _dockPreviewHoverDelayMs = Published(initialValue: defaults.integer(forKey: Keys.dockPreviewHoverDelayMs))
+        _dockPreviewHideDelayMs = Published(initialValue: defaults.integer(forKey: Keys.dockPreviewHideDelayMs))
         _dockPreviewGlassBackground = Published(initialValue: defaults.bool(forKey: Keys.dockPreviewGlassBackground))
         _cmdTabSwitcherEnabled = Published(initialValue: defaults.bool(forKey: Keys.cmdTabSwitcherEnabled))
         _windowSwitcherShowWindowlessApps = Published(initialValue: defaults.bool(forKey: Keys.windowSwitcherShowWindowlessApps))
@@ -398,6 +401,13 @@ final class SettingsStore: ObservableObject {
     @Published var dockPreviewHoverDelayMs: Int {
         didSet {
             defaults.set(dockPreviewHoverDelayMs, forKey: Keys.dockPreviewHoverDelayMs)
+        }
+    }
+
+    /// 鼠标离开 图标∪面板 区域后多久收起预览（毫秒）：调大可让鼠标从容移到面板上
+    @Published var dockPreviewHideDelayMs: Int {
+        didSet {
+            defaults.set(dockPreviewHideDelayMs, forKey: Keys.dockPreviewHideDelayMs)
         }
     }
 

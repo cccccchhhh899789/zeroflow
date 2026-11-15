@@ -119,7 +119,7 @@ SwiftUI 视图 + AppKit/CG/AX(含私有 API dlsym 桥)服务层 + UserDefaults/A
 | `CGSWindowServer.swift` | SkyLight/CGS 私有 API dlsym 桥:SLS 批量枚举、Space 拓扑、跨 Space 激活 |
 | `CommandTabSwitcher.swift` | ⌘⇥ 切换器:CGEventTap 拦截 + 会话键盘(⇥/⇧⇥/方向键)+ 悬停卡片操作 |
 | `DockClickMinimizer.swift` | Dock 单击最小化:CGEventTap + Dock AX 命中 |
-| `DockHoverPreviewController.swift` | Dock 悬停预览:listen-only CGEventTap + idle→pending→visible 状态机(generation 作废);触发/闸门用「每块屏各一条 Dock 边缘带」(Dock 的 AX 树只暴露一块屏的图标,见 DEV-058);朝向读 Dock 偏好、侧边 Dock 的退化 AX 坐标见 DEV-059 |
+| `DockHoverPreviewController.swift` | Dock 悬停预览:listen-only CGEventTap + idle→pending→visible 状态机(generation 作废);触发/闸门用「每块屏各一条 Dock 边缘带」(Dock 的 AX 树只暴露一块屏的图标,见 DEV-058;副屏「换隔壁图标」只能靠 AX 重解析,见 DEV-062);朝向读 Dock 偏好、侧边 Dock 的退化 AX 坐标见 DEV-059;保活区 = 图标∪面板外扩 + 「图标→面板」走廊,换目标不再立刻收面板,弹出/收起延迟由设置滑杆控制(见 DEV-060/061) |
 | `FinderCommandRunner.swift` | 代执行扩展转交的自定义命令:请求文件 + 分布式通知 IPC,启动消化积压(>30s 丢弃) |
 | `FinderSyncReloader.swift` | 陈旧扩展自愈:pluginkit ignore→use election 循环重载(Sequoia/Tahoe bug) |
 | `GlobalHotkeyManager.swift` | Carbon 全局热键注册/注销(截图 + 剪贴板两路,事件按 HotKeyID 分发),分别受 `screenshotEnabled` / `clipboardEnabled` 控制 |

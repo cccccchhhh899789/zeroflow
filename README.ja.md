@@ -6,9 +6,9 @@ macOS ネイティブの軽量ユーティリティ集。スクリーンショ�
 
 無料・広告やポップアップなし・サードパーティ製ライブラリ不使用。パッケージは小さく、起動は速く、常駐メモリもわずかです。
 
-![macOS 14.0+](https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple&logoColor=white)
-![Release](https://img.shields.io/github/v/release/hellolio/zeroflow)
-![License](https://img.shields.io/github/license/hellolio/zeroflow)
+[![macOS 14.0+](https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple&logoColor=white)](https://github.com/hellolio/zeroflow)
+[![Latest release](https://img.shields.io/github/v/release/hellolio/zeroflow)](https://github.com/hellolio/zeroflow/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/hellolio/zeroflow)](LICENSE)
 
 ## 機能
 

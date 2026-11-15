@@ -6,9 +6,9 @@ macOS 原生的轻量效率工具集：截图标注、窗口切换、Dock 增强
 
 免费、无广告弹窗、无第三方依赖，安装包小、启动快、常驻内存低。
 
-![macOS 14.0+](https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple&logoColor=white)
-![Release](https://img.shields.io/github/v/release/hellolio/zeroflow)
-![License](https://img.shields.io/github/license/hellolio/zeroflow)
+[![macOS 14.0+](https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple&logoColor=white)](https://github.com/hellolio/zeroflow)
+[![Latest release](https://img.shields.io/github/v/release/hellolio/zeroflow)](https://github.com/hellolio/zeroflow/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/hellolio/zeroflow)](LICENSE)
 
 ## 功能
 

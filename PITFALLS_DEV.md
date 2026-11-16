@@ -340,3 +340,22 @@
 - **Prevention:** 保活区改为「图标自身 ∪ 面板自身 ∪ `isInTransitCorridor` 走廊」，**删掉并集分支**：走廊沿朝向轴从图标边缘延伸到面板边缘、横截面只取图标跨度（再外扩 `keepAliveInset`），缝隙照样覆盖，但不会横向吞掉邻域。`failResolve` 复用同一函数，于是「指针停在别的图标上且该目标无窗口」自然落进收起分支——且是立即收，不等收起延迟。
 - **代价:** 从图标**斜向**移向面板角落时可能短暂出走廊，触发一次收起延迟（默认 500ms）；指针进面板后 `bumpHideGen` 取消。观感上是一次可配置延迟，不会闪。
 - **验证:** 悬停有窗口的 A → 平移到隔壁无窗口的 B：日志应出现 `hide (target has no windows)` 而不是 `keep panel, resolve miss (target has no windows)`；平移到有窗口的 C 仍原位换内容；慢速从 A 移向面板仍不掉（DEV-060 的验证照旧通过）。
+
+## DEV-066: 自动隐藏 Dock 时「Dock 没展开也弹预览」，以及偶发「面板过于偏下」——两条链路都缺「Dock 真的在屏上」这个判据
+- **Pitfall:** ① 系统设置 Dock 自动隐藏后，鼠标移到屏幕下方（Dock 还没推出来）仍然弹出预览面板；② 极小概率面板位置偏下（半截压在屏幕底边之外），或「Dock 还没滑完就弹，位置算错」。
+- **Cause:** 两条问题同源，代码里没有任何「Dock 当前是否真的展开」的判据，几何全靠「屏幕边缘 + 缓存投影」推：
+  ① 触发带厚 `bottomBandMinThickness = 96` + `stripTriggerMargin = 30`，屏幕底部 126pt 都算「靠近 Dock」（真实图标行只有 ~54pt）；`cachedItem` 的跨屏投影（DEV-063）把隐藏位条带按 `to.maxY − strip.maxY` 抬到「展示位」，于是 Dock 明明没展开，缓存也给出一个落在图标行内的假命中。延时到期后 `resolveTarget` 返回 `notDockElement`（正确），`resolveAndShow` 的**缓存兜底**照样接受这个投影 frame；位置闸门 `isInDockZone` 又是按屏幕边推的、与命中项无关 → 放行 → 面板弹出。
+  ② 展开动画中途 AX 命中给出的 frame 尺寸正常但位置偏低（隐藏位/插值位），`sanitizedAnchor` 只挡退化 frame（宽高 < 8）→ 原样当锚点；`DockPreviewPanel.layoutAndPosition` 的 `.above` 只钳 x **不钳 y**（`origin.y = anchorCocoa.maxY + 2`），锚点在屏幕外时 `origin.y` 变负 → 面板只剩上半截可见。重试机制（DEV-064 放宽成「只要在带内」）只覆盖「解析失败」，**「解析成功但 Dock 还在滑」这条路径没有任何等待**。
+- **Prevention:** ① 新增 `dockRevealState(at:)` 三态判据，上屏前必须不是 `.hidden`：**主判据** `liveDockStripTL()` 读 Dock 应用元素子元素（唯一那个 AXList）的**实时** frame（不能用缓存，缓存会长期停在隐藏位），只比「沿 Dock 边法线的贴合程度」（`gap ≤ revealFlushTolerance = 6`）——**不比面积**，放大动画期间条带会横向撑开约 30%，按面积比会误判成「没展开」导致面板永不弹出；**副判据** `dockEdgeArmed`（指针贴过 Dock 那条边 `revealSliver = 6`，系统只在贴边时推出 Dock）**只放行不否决**，只在主判据判不出来（多显示器副屏 / 侧边 Dock 退化坐标 / AX 读不到）时生效，判不出来仍按旧行为放行——宁可保留偶发误弹，也不让这些配置直接失效。② 锚点体检：命中项/投影 frame 的中心必须在指针所在屏内（外扩 2pt），否则 `failResolve` 走重试预算等展开动画。③ `layoutAndPosition` 四个朝向的 origin 一律钳进 `screen.frame`（内缩 8pt），锚点再错也不会把面板推出屏幕。
+- **代价:** 自动隐藏时「贴边 → Dock 展开 → 面板出现」多等约一个展开动画（重试 0.12s/次，预算 1.2s），观感是面板晚 0.1–0.2s 出来，不会闪。
+- **验证:** `defaults write com.zeroflow.app dockPreviewDebug -bool true` 后重启（**必须**先 `pkill -f "Zeroflow.app/Contents/MacOS/Zeroflow"` 再 `open`，见 DEV-064）。① 指针移到屏幕底部但**不贴边**（Dock 保持收起）→ 日志应出现 `dock not revealed ... liveStrip=...`，不弹面板；② 贴边展开 Dock 后悬停图标 → 日志 `resolve ... reveal=revealed`，面板贴在图标上方；③ 快速划过 Dock 底部 → 面板不应出现位置偏移；④ 若出现「自动隐藏时预览完全不弹」且日志里 `reveal=hidden` 而 `liveStrip` 的 frame 明明已贴住屏幕底边，说明该屏 Dock 的贴合余量超过 `revealFlushTolerance`（6pt），把它放大到 10–12pt 即可（不要直接删判据）。
+
+## DEV-067: 移到隔壁「无窗口」图标时旧预览迟迟不收——换目标判定用了放大态的过期快照，而不是当前实际几何
+- **Pitfall:** 悬停有预览的图标 A → 指针平移到隔壁**没有打开窗口**的图标 B：预期是立刻收掉 A 的预览（B 不弹）。实际指针进到 B 左半块时毫无反应，必须再往右移到 B 中间偏右才收。开启 Dock 放大（magnification）时明显，关掉放大几乎复现不出来。
+- **Cause:** 「指针是否还在当前图标上」完全由两份**过期快照**判定，而放大是连续动画，布局每一帧都在变：
+  ① `currentItemTL` 是 `present` 那一刻（指针压在 A 上、A 已放大到峰值）冻结的 AX frame，之后不再更新。本机实测 `tilesize=40` / `largesize=71`（放大 1.78×）、基准槽距 42pt（DEV-038 日志 588/14）→ 锚点每侧比槽位宽出 `(71−42)/2 ≈ 14.5pt`，再加 `keepAliveInset = 6` → 边界伸进 B 槽位约 **49%**，正好是「中间偏右」。
+  ② `cachedItem` 的 `dockItems` 是异步重建的缓存（0.3s 防抖），放大动画期间就是过期快照（DEV-064 实测条带宽度在 588/626/661/689 间跳），B 的 frame 被推右 → 指针在 B 左半块时缓存命中不到 B → `.visible` 的「换目标」分支不触发，只剩「离开保活区 → 500ms 宽限隐藏」一条路。
+  **要点：不是「放大后的尺寸不能用」，而是拿历史快照当当前布局。**面板定位需要冻结锚点（否则图标重排时面板会跟着晃），命中判定需要实时几何——两者共用同一个 rect 是设计缺口。
+- **Prevention:** 新增 `probeLiveSwitchIfNeeded`：`.visible` 且指针在 Dock 边带内、**沿 Dock 轴**位移 ≥ `liveProbeAxisDelta = 8pt` 时（节流 `liveProbeInterval = 100ms`）问一次 AX 权威命中「这个点是哪个图标」；命中另一个目标就 `scheduleShow(hoverDelay)` 走正常换目标流程。三条硬约束：① AX 调用**必须**异步跑在 `workQueue`——事件 tap 有响应超时，慢了会被系统直接停掉；② 只认沿 Dock 轴的位移，法线方向（图标→面板）不触发，否则会打掉 DEV-060/061 的保活语义；③ 指针在 `panelFrameTL` 内直接跳过（面板下沿可能压进边缘带）。配套：`failResolve` 增加 `differentTarget` 参数——实时命中已确认指针在**另一个**图标上且该目标无窗口时直接 `hidePanel`，不再问保活区；`currentTargetKey`（present 写入 / hidePanel / failResolve 清空）提供身份比对，`pendingSwitchKey` 防止连续 move 反复重置防抖。
+- **代价:** 面板显示且指针移动时最多 10 次/秒 AX 命中（静止悬停零开销）。AX 命中抖动仍由 1.2s 重试预算兜（DEV-064）。
+- **验证:** `dockPreviewDebug` 打开后 A → B(无窗口)：日志应出现 `switch by live hit pt=... -> app:...`，随后 `hide (target has no windows)`，面板在指针进入 B 后约 100–400ms 内收起（= 探测节流 + 换目标防抖），不再等走到 B 偏右。回归项：DEV-061 的「去面板途中蹭到隔壁图标」仍应是 `keep panel, resolve miss`；DEV-060 慢速从图标移到面板仍不掉。

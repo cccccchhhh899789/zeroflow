@@ -33,6 +33,11 @@ final class AppIconCache {
         return icon(for: app)
     }
 
+    /// 「一键清理」用：丢弃全部图标缓存（约每张 64KB，最多 64 张），下次绘制按需重建
+    func clearCache() {
+        cache.removeAllObjects()
+    }
+
     /// 画成固定边长单表示位图（约 64KB）；绘制完原图即释放
     private static func downsample(_ icon: NSImage) -> NSImage? {
         let side = pixelSide

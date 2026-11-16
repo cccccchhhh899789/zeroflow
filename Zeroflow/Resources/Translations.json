@@ -933,5 +933,45 @@
     "zh-Hans": "该权限与 Dock 单击最小化、窗口切换器等功能共用，若已开启则此处直接显示绿色。",
     "en": "This permission is shared with Dock click-to-minimize, the window switcher and other features; if it is already granted, this row shows green.",
     "ja": "この権限は Dock のクリック最小化やウィンドウスイッチャーなどと共通です。すでに許可されている場合はここに緑色で表示されます。"
+  },
+  "核": {
+    "zh-Hans": "核",
+    "en": "cores",
+    "ja": "コア"
+  },
+  "读": {
+    "zh-Hans": "读",
+    "en": "Read",
+    "ja": "読"
+  },
+  "写": {
+    "zh-Hans": "写",
+    "en": "Write",
+    "ja": "書"
+  },
+  "一键清理": {
+    "zh-Hans": "一键清理",
+    "en": "Clean Up",
+    "ja": "クリーンアップ"
+  },
+  "正在清理…": {
+    "zh-Hans": "正在清理…",
+    "en": "Cleaning…",
+    "ja": "クリア中…"
+  },
+  "已清理 %@": {
+    "zh-Hans": "已清理 %@",
+    "en": "Freed %@",
+    "ja": "%@ を解放"
+  },
+  "没有可清理的缓存": {
+    "zh-Hans": "没有可清理的缓存",
+    "en": "Nothing to clean",
+    "ja": "クリアする項目はありません"
+  },
+  "清理 ~/Library/Caches 下可丢弃的缓存文件；不会删除任何文档，清理后部分应用首次启动会稍慢": {
+    "zh-Hans": "清理 ~/Library/Caches、各沙盒容器缓存与 ~/Library/Logs；不会删除任何文档，清理后部分应用首次启动会稍慢",
+    "en": "Removes disposable caches under ~/Library/Caches, sandbox container caches and ~/Library/Logs. No documents are deleted; some apps may start slower the first time afterwards.",
+    "ja": "~/Library/Caches、各サンドボックスコンテナのキャッシュ、~/Library/Logs を削除します。書類は削除されません。クリア後、一部のアプリは初回起動が少し遅くなります。"
   }
 }

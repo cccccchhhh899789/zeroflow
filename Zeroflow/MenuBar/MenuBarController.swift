@@ -131,6 +131,15 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSWindowDelegate
         // 内存探针 / 循环压测（默认关闭，见 MemoryProbe / MemoryCycleRunner）
         MemoryProbe.startIfNeeded()
         MemoryCycleRunner.startIfNeeded()
+
+        // 「一键清理」压测：ZEROFLOW_CLEAN_ON_LAUNCH=<秒> 延时自动跑一次（默认关闭）
+        if let raw = ProcessInfo.processInfo.environment["ZEROFLOW_CLEAN_ON_LAUNCH"] {
+            let delay = Double(raw) ?? 1.5
+            ZSLog("env ZEROFLOW_CLEAN_ON_LAUNCH: defer \(delay)s then clean")
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                CacheCleaner.shared.clean()
+            }
+        }
     }
 
     private func setupMenuBar() {

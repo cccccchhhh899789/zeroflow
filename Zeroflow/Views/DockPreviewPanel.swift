@@ -170,21 +170,20 @@ final class DockPreviewPanel: NSPanel {
         setContentSize(size)
 
         if let screen {
-            let origin: NSPoint
+            let raw: NSPoint
             switch placement {
             case .above:
-                let x = Self.clamp(anchorCocoa.midX - size.width / 2,
-                                   screen.frame.minX + 8, screen.frame.maxX - size.width - 8)
-                origin = NSPoint(x: x, y: anchorCocoa.maxY + 2)
+                raw = NSPoint(x: anchorCocoa.midX - size.width / 2, y: anchorCocoa.maxY + 2)
             case .rightOf:
-                let y = Self.clamp(anchorCocoa.midY - size.height / 2,
-                                   screen.frame.minY + 8, screen.frame.maxY - size.height - 8)
-                origin = NSPoint(x: anchorCocoa.maxX + 2, y: y)
+                raw = NSPoint(x: anchorCocoa.maxX + 2, y: anchorCocoa.midY - size.height / 2)
             case .leftOf:
-                let y = Self.clamp(anchorCocoa.midY - size.height / 2,
-                                   screen.frame.minY + 8, screen.frame.maxY - size.height - 8)
-                origin = NSPoint(x: anchorCocoa.minX - 2 - size.width, y: y)
+                raw = NSPoint(x: anchorCocoa.minX - 2 - size.width, y: anchorCocoa.midY - size.height / 2)
             }
+            // 兜底：不管锚点算成什么（Dock 隐藏位、展开动画中途的低位 frame、侧边 Dock 的
+            // 退化坐标），面板都必须完整留在屏幕内。`.above` 尤其要钳 y——锚点在屏幕外时
+            // `origin.y` 会变成负值，面板只剩上半截可见，表现为「预览位置过于偏下」。
+            let origin = NSPoint(x: Self.clamp(raw.x, screen.frame.minX + 8, screen.frame.maxX - size.width - 8),
+                                 y: Self.clamp(raw.y, screen.frame.minY + 8, screen.frame.maxY - size.height - 8))
             setFrameOrigin(origin)
         }
     }

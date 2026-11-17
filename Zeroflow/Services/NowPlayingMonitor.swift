@@ -70,7 +70,6 @@ final class NowPlayingMonitor: ObservableObject {
     /// 出声列表哨兵（0.3s），见 `checkActivity`
     private var activityTimer: Timer?
     private var lastActiveSet: Set<String> = []
-    private var lastSession: SessionSnapshot?
     /// 每个 app 最近一次「被操作」的时刻：进了出声列表（开始播），或上报会话的播放态翻转
     /// （暂停→播放不改变出声列表，只能从 playbackRate 看出来）。卡片展示它最大的那个，
     /// 也就是用户最后操作音频的那个 app（见 DEV-078）。
@@ -171,7 +170,6 @@ final class NowPlayingMonitor: ObservableObject {
             activityTimer?.invalidate()
             activityTimer = nil
             lastActiveSet = []
-            lastSession = nil
             // 刻意不清 `operatedAt`/`previousActives`：面板关着的时候用户也可能换着播，
             // 留着「上一次是谁」比每次重开都退回 owner 更贴近用户预期
             nowPlaying = nil
@@ -181,8 +179,9 @@ final class NowPlayingMonitor: ObservableObject {
     }
 
     /// 出声列表的高频哨兵：枚举 CoreAudio process object 只是几个属性读取（微秒级），
-    /// 但元数据（AX + CGWindowList）很贵。分开跑——谁开始/停止出声 0.3s 内就能发现，
-    /// 不用等 2s 元数据轮询，体感才是「切 app 立刻反应」
+    /// 但元数据（子进程 + AX + CGWindowList）很贵。分开跑——谁开始/停止出声 0.3s 内就能发现，
+    /// 不用等 2s 元数据轮询，体感才是「切 app 立刻反应」。
+    /// 只比出声集合：会话快照在进程内是冻结的（DEV-082），比它没有意义
     private func startActivityWatcher() {
         activityTimer?.invalidate()
         let t = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
@@ -196,13 +195,10 @@ final class NowPlayingMonitor: ObservableObject {
         guard timer != nil, !inFlight else { return }
         let bundles = AudioActivityMonitor.activeApps().map { $0.bundleID ?? "?" }
         let set = Set(bundles)
-        let session = Self.sessionSnapshot()
-        let changed = set != lastActiveSet || session != lastSession
+        guard set != lastActiveSet else { return }
         lastActiveSet = set
-        lastSession = session
-        guard changed else { return }
         if Self.debug {
-            ZSLog("NowPlaying: 哨兵 set=[\(bundles.joined(separator: ","))] owner=\(session.owner ?? "-") playing=\(session.playing) title=\(session.title ?? "-") → 立刻补查")
+            ZSLog("NowPlaying: 哨兵 set=[\(bundles.joined(separator: ","))] → 立刻补查")
         }
         tick()
     }
@@ -307,60 +303,64 @@ final class NowPlayingMonitor: ObservableObject {
 
     // MARK: - 合并两个数据源
 
-    /// 优先系统 Now Playing（信息全、可控制），其缺失或与真实出声方冲突时用 CoreAudio 兜底
+    /// 合并顺序（越靠前越优先）：
+    /// 1. 出声列表里**最后被操作**的那个 app（`pickActive`，DEV-078），它同时有上报会话就用
+    ///    会话信息（曲名/进度更全）；
+    /// 2. 谁都没在响时锁住「上一次真的在放的 app」（DEV-076）；
+    /// 3. 最后才退到暂停态的会话。
     /// - Parameter audible: 系统混音当前有没有声音；nil = 没在捕获，属于「不知道」，
     ///   此时不能判暂停。出声列表非空但没声音 = app 只是占着输出流（QQ音乐暂停后
     ///   `IsRunningOutput` 不归零），要按「已暂停」展示
     private func read(audible: Bool?) -> NowPlayingInfo? {
-        let owner = Self.nowPlayingOwnerBundleID()
-        let media = useSubprocess ? readViaSubprocess() : readInProcess()
+        // 会话必须走子进程读：进程内的 `MRNowPlayingRequest` 属性**冻结在首次读取**
+        // （实测 app 退出 12s 后长跑进程还报它的 bundleID，新进程立刻正确），
+        // 而 C 接口在这版 macOS 上被阉（PID 恒 0、DisplayID 恒 nil），见 DEV-082
+        let media = readNowPlaying()
+        // owner 就用会话自己报的 bundleID——它和媒体键的目标是同一个，而且比单独再查一次省事
+        let owner = media?.appBundleID ?? Self.nowPlayingOwnerBundleID()
         let actives = AudioActivityMonitor.activeApps(owner: owner)
         logActives(actives, owner: owner, audible: audible)
         trackOperations(actives: actives, media: media, owner: owner, audible: audible)
-        let active = pickActive(actives, owner: owner)
+        let active = pickActive(actives, owner: owner, media: media, audible: audible)
 
-        // 谁也没在响：锁住「上一次真的在放的那个 app」，别跟着系统会话跳。
-        // 只是把浏览器切到前台、或它加载了视频但没播，媒体会话就会挪过去——卡片不该跟着换，
-        // 只有真的出声（点了播放）才换（见 DEV-076）
-        if audible != true, active == nil, let cached = lastAudioApp,
-           let held = idleInfo(from: cached, isPlaying: false) {
-            logIfChanged("hold app=\(cached.bundleID ?? "-")")
-            return held
-        }
-
-        // 有 app 在出声：以「最近开始播的那个」为准（pickActive）。它同时上报了系统会话时
-        // 用会话信息（曲名/进度更全），否则走 CoreAudio 兜底
-        if let active {
+        // 有 app 在出声（或电平还没测出来）：显示最后被操作的那个出声方。
+        // 它同时有上报会话时用会话信息（曲名/进度更全）
+        if audible != false, let active {
             if let media, AudioActivityMonitor.sameApp(media.appBundleID, active.bundleID) {
-                lastAudioApp = (active.pid, active.bundleID, active.name)
-                logIfChanged("media app=\(media.appBundleID ?? "-") (最新出声方)")
+                logIfChanged("media app=\(media.appBundleID ?? "-")（最新出声方）")
                 return media
             }
             return audioOnlyInfo(active, actives: actives, owner: owner, audible: audible)
         }
 
-        // 出声列表空着：可能是真暂停（QQ音乐这类不上报的 app 暂停后彻底消失），
-        // 也可能是出声探测漏了进程（未在 LaunchServices 注册的 helper）。用混音有没有声音区分
-        let playing = audible ?? false
         // 有声但还没认出是谁在出声（进程注册比声音晚一拍）：马上补查一次，
         // 不然要等下一个 2s 轮询，体感就是「浏览器切回 QQ音乐很慢」
-        if playing, let retry = quickRetry() {
+        if audible == true, active == nil, let retry = quickRetry() {
             DispatchQueue.main.asyncAfter(deadline: .now() + retry) { [weak self] in self?.tick() }
         }
-        if let cached = lastAudioApp, let info = idleInfo(from: cached, isPlaying: playing) {
-            logIfChanged("idle app=\(cached.bundleID ?? "-") playing=\(playing)")
-            return info
+
+        // 谁也没在响：锁住「上一次真的在放的那个 app」，别跟着系统会话跳。
+        // 只是把浏览器切到前台、或它加载了视频但没播，媒体会话就会挪过去——卡片不该跟着换，
+        // 只有真的出声（点了播放）才换（见 DEV-076）
+        if let cached = lastAudioApp,
+           let held = idleInfo(from: cached, isPlaying: audible ?? false) {
+            logIfChanged("hold app=\(cached.bundleID ?? "-")")
+            return held
         }
-        // 进程刚起来 / 面板之前没打开过，没有「刚才谁在放」的记忆；
-        // 但系统仍认着 now playing owner，按它的 bundleID 找运行中的 app，同样能补出来
-        if let bid = owner,
-           let app = NSRunningApplication.runningApplications(withBundleIdentifier: bid).first,
-           let info = idleInfo(from: (app.processIdentifier, bid, app.localizedName), isPlaying: playing) {
-            logIfChanged("idle(owner) app=\(bid) playing=\(playing)")
-            return info
+
+        if let media {
+            logIfChanged("media(paused) app=\(media.appBundleID ?? "-")")
+            return media
         }
         logIfChanged("idle owner=\(owner ?? "-")")
-        return media
+        return nil
+    }
+
+    /// 读「系统 Now Playing」。子进程优先（唯一能拿到新鲜值的路径，~77ms，跑在轮询队列上），
+    /// 失败再退回进程内——进程内的值虽然会冻结，但比什么都没有强
+    private func readNowPlaying() -> NowPlayingInfo? {
+        if let fresh = readViaSubprocess() { return fresh }
+        return useSubprocess ? nil : readInProcess()
     }
 
     /// 记录「谁刚被操作」。五个信号，缺一个就会有一个方向切不过去：
@@ -414,16 +414,32 @@ final class NowPlayingMonitor: ObservableObject {
 
     /// 卡片展示哪个 app：出声列表里**最后被操作**的那个。
     /// 这样「点了 QQ音乐播放」或「点了浏览器播放」都能立刻切过去，而不是被系统会话槽拖着走（见 DEV-078）
-    private func pickActive(_ actives: [AudioActivity], owner: String?) -> AudioActivity? {
+    private func pickActive(_ actives: [AudioActivity], owner: String?,
+                            media: NowPlayingInfo?, audible: Bool?) -> AudioActivity? {
         guard !actives.isEmpty else { return nil }
-        let best = actives.max {
-            (operatedAt[$0.bundleID ?? ""] ?? 0) < (operatedAt[$1.bundleID ?? ""] ?? 0)
-        }
+        // 时间戳相同时按数组顺序（owner 优先、媒体类优先），别用不稳定的排序
+        let ranked = actives.enumerated().sorted { lhs, rhs in
+            let l = operatedAt[lhs.element.bundleID ?? ""] ?? 0
+            let r = operatedAt[rhs.element.bundleID ?? ""] ?? 0
+            return l == r ? lhs.offset < rhs.offset : l > r
+        }.map(\.element)
+        let best = ranked.first
+
         // 一次操作都没记过（刚启动 / 面板刚打开）：跟着系统会话 owner 走，总比随便挑一个强
         if let best, operatedAt[best.bundleID ?? ""] == nil, let owner,
            let owned = actives.first(where: { AudioActivityMonitor.sameApp($0.bundleID, owner) }) {
             return owned
         }
+
+        // 混音里有声音、而排第一的那个会话明确是暂停态：那声音是别人发的
+        // （暂停后仍占着输出流的 app 很常见，见 DEV-075/079），换下一个候选
+        if audible == true, let media, !media.isPlaying, ranked.count > 1 {
+            if let other = ranked.first(where: { !AudioActivityMonitor.sameApp($0.bundleID, media.appBundleID) }) {
+                if Self.debug { ZSLog("NowPlaying: pick 跳过暂停会话 \(media.appBundleID ?? "-") → \(other.bundleID ?? "?")") }
+                return other
+            }
+        }
+
         if Self.debug, let best {
             // 排查「为什么显示的是它」：每个候选距今多久被记成「刚被操作」
             let now = CFAbsoluteTimeGetCurrent()

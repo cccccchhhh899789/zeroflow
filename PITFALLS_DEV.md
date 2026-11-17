@@ -505,5 +505,11 @@
 
 - **Pitfall:** 卡片显示 QQ音乐,点播放却把浏览器里的视频播起来了。
 - **Cause:** 播放控制只有一条通道——系统媒体键(`NX_KEYTYPE_PLAY`),它由 MediaRemote 分发给**当前 now playing owner**,调用方无法指定目标。实测排除的替代路径:① `MRMediaRemoteSendCommandToApp(cmd, nil, bundleID, nil)` 传 bundleID 直接 SIGSEGV(第 3 参不是 CFString,真实签名要 playerPath/私有授权);② `MRMediaRemoteSendCommand` 对不上报 Now Playing 的 app 无效;③ QQ音乐的播放控制栏在 AX 里是自绘 `AXUnknown`(`desc="播放"`、有精确 frame、但 `actions=[]`),按不动;④ 就算按 frame 用 `CGEvent.postToPid` 点,QQ 后台时 AX 树连窗口都不暴露(`AXWindows` 为 0,只有它自己在前台才可见),拿不到坐标。⑤ 给 owner 发 `stop` 也踢不掉槽(实测 owner 不变)。
-- **Prevention:** 目前**不做特殊处理**,只在 `send()` 里打一行诊断:`send togglePlay card=X owner=Y ⚠️不一致`。要不要把卡片改成「只显示按钮真正控得到的 app」,或者「显示最后操作的 app 但不可控时置灰」,是产品取舍,待定。
-- **代价:** 只要浏览器(或任何上报 Now Playing 的 app)占着会话槽,媒体键就一定先到它手上;想让 QQ音乐被控,只能等它自己成为路由目标。
+- **Prevention:** 目前**不做特殊处理**,只在 `send()` 里打一行诊断:`send togglePlay card=X owner=Y ⚠️不一致`。**别试图用「显示=按钮能控的那个」来兜**:到底谁会被控,取决于系统按「谁在播/谁最后被操作」做的路由,而我们既拿不到可靠的路由结果(见 DEV-082),合成的媒体键在测试环境里也对不上(打一次 key,Chrome 暂停的视频没恢复、会话方的 mock 也没暂停)——按它做显示规则只会把浏览器重新推上卡片。所以显示仍按「最后被操作的出声 app」,控制照发媒体键。
+- **代价:** 只要浏览器(或任何上报 Now Playing 的 app)占着会话槽,媒体键就可能先到它手上;想让 QQ音乐被控,只能等它自己成为路由目标。真正自洽的替代方案只有「显示最后操作的 app + 不可控时置灰」,需要产品上接受按钮点不动。
+## DEV-082: 进程内读 MediaRemote 会**冻结**在首次读取,长跑进程永远看不到 owner 变化
+
+- **Pitfall:** app 启动时浏览器正占着会话槽,之后浏览器关了、QQ音乐开始播,卡片却一直按「owner 是浏览器」来判——显示浏览器、控制也发给了浏览器。重启 app 立刻正常。看起来像「显示逻辑又错了」,其实是读数本身是死的。
+- **Cause:** `MRNowPlayingRequest` 的类属性(`localNowPlayingPlayerPath` / `localNowPlayingItem`)在**每个进程里只求值一次**就缓存住。实测:让一个上报型 app 成为 owner 再把它杀掉,长跑 20s 的探针在它退出 12s 后仍然报它的 bundleID,而同一时刻新起的进程立刻报 `com.google.Chrome`。注册 `MRMediaRemoteRegisterForNowPlayingNotifications` 也没用。C 接口在这版 macOS 上全被阉:`MRMediaRemoteGetNowPlayingApplicationPID` 恒返回 0、`MRMediaRemoteGetApplicationDisplayID` 恒 nil、`MRMediaRemoteGetLocalNowPlayingPlayerPath` 的 block 根本不回调。
+- **Prevention:** 会话改走**子进程**读(`osascript -l JavaScript`,`readNowPlaying()` 优先 `readViaSubprocess()`),进程内只作兜底。实测一次 ~77ms(含进程启动),跑在轮询队列上,2s 一次约 1% CPU,换来的是**每次都是新鲜值**(曲名/歌手/bundleID/playbackRate 全对)。同理,0.3s 哨兵只比出声集合,不再比会话快照(比它没有意义)。
+- **验证:** 让上报型 app 成为 owner 再杀掉,新起的进程应报 `com.google.Chrome`;app 不重启也应跟着变(`media(owner)` 日志里的 bundleID 会变)。

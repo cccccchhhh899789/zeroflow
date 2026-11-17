@@ -378,8 +378,13 @@ final class NowPlayingMonitor: ObservableObject {
         for bid in live where !previousActives.contains(bid) { operatedAt[bid] = now }
         previousActives = live
 
-        // 2) 会话 owner 换人：只认还在出声列表里的，避免「加载了但没播」的 app 被算成操作过
-        if let owner, owner != previousOwner {
+        // 2) 会话 owner 换人：只认「还在出声列表里 + 会话真的在播」的。
+        // 光看 owner 会踩两个坑：① 浏览器加载了页面但没播也会抢槽；② 会话没有曲名时
+        // `localNowPlayingPlayerPath` 照样指着一个僵尸 app（实测 Chrome 空闲后一直占着）。
+        // 这两类都不是「被操作」，认了就会让浏览器永远压着真正在响的 app（见 DEV-080）
+        if let owner, owner != previousOwner, let media, media.isPlaying,
+           AudioActivityMonitor.sameApp(media.appBundleID, owner),
+           live.contains(where: { AudioActivityMonitor.sameApp($0, owner) }) {
             for bid in live where AudioActivityMonitor.sameApp(bid, owner) { operatedAt[bid] = now }
         }
         previousOwner = owner
@@ -398,16 +403,11 @@ final class NowPlayingMonitor: ObservableObject {
             lastMediaIdentity[bid] = (media.title, media.elapsed)
         }
 
-        // 4) 静→响且只有一个候选：必然是它。多个候选时退而信 owner（会话刚被它抢到）。
-        // 标记用完即清，别让它一直生效
+        // 4) 静→响且只有一个候选：必然是它。多候选时**不猜**——猜错就是「卡片显示 A、
+        // 实际响的是 B」，比不动更糟（见 DEV-079/080）
         if audible == true, sawSilence {
             sawSilence = false
-            if actives.count == 1, let bid = actives[0].bundleID {
-                operatedAt[bid] = now
-            } else if let owner,
-                      let owned = actives.first(where: { AudioActivityMonitor.sameApp($0.bundleID, owner) }) {
-                operatedAt[owned.bundleID ?? ""] = now
-            }
+            if actives.count == 1, let bid = actives[0].bundleID { operatedAt[bid] = now }
         }
         operatedAt = operatedAt.filter { live.contains($0.key) }
     }
@@ -423,6 +423,16 @@ final class NowPlayingMonitor: ObservableObject {
         if let best, operatedAt[best.bundleID ?? ""] == nil, let owner,
            let owned = actives.first(where: { AudioActivityMonitor.sameApp($0.bundleID, owner) }) {
             return owned
+        }
+        if Self.debug, let best {
+            // 排查「为什么显示的是它」：每个候选距今多久被记成「刚被操作」
+            let now = CFAbsoluteTimeGetCurrent()
+            let ages = actives.map { a -> String in
+                let bid = a.bundleID ?? "?"
+                let age = operatedAt[bid].map { String(format: "%.1fs", now - $0) } ?? "从未"
+                return "\(bid)=\(age)"
+            }.joined(separator: " ")
+            ZSLog("NowPlaying: pick=\(best.bundleID ?? "?") [\(ages)] owner=\(owner ?? "-")")
         }
         return best
     }
@@ -511,6 +521,13 @@ final class NowPlayingMonitor: ObservableObject {
 
     func send(_ command: Command) {
         guard let info = nowPlaying else { return }
+        // 诊断：媒体键只会落到 now playing owner 身上。卡片上是谁、owner 是谁，两者不一致时
+        // 按下去就会控到别的 app（浏览器占着槽是最常见的），先把这对值打出来，别靠猜
+        if Self.debug {
+            let owner = Self.nowPlayingOwnerBundleID()
+            let mismatch = !AudioActivityMonitor.sameApp(owner, info.appBundleID)
+            ZSLog("NowPlaying: send \(command) card=\(info.appBundleID ?? "-") owner=\(owner ?? "-")\(mismatch ? " ⚠️不一致" : "")")
+        }
         switch info.control {
         case .mediaRemote:
             guard let fn = sendCommandFn else { return }

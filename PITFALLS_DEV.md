@@ -493,3 +493,17 @@
 - **Prevention:** 目前只在「能归属」的情况下记账(见 DEV-078 的五个信号),归属不了就不改展示,避免瞎猜导致卡片乱跳。真要彻底解决得上 **process tap**(`AudioHardwareCreateProcessTap`,macOS 14.2+)给每个候选进程单独取电平,代价是要为每个进程建 aggregate device + IOProc,属于另一个量级的改动。
 - **验证:** 用 `/tmp/zfmock` 的两个假播放器:`play a` → `play b` → `pause a` → `pause b`(此时两个都占着流、混音静)→ `play a`,卡片会停在最后操作的 B 上而不是 A。这是已知限制,不是回归。
 
+## DEV-080: 僵尸 now playing 会话不能当成「刚被操作」,否则浏览器永远压着真正在响的 app
+
+- **Pitfall:** 给 `operatedAt` 加「会话 owner 换人 = 被操作」这个信号之后,浏览器彻底主导:不管最后操作的是谁,卡片都显示浏览器,点播放也确实播浏览器。
+- **Cause:** `localNowPlayingPlayerPath` 只表示「谁占着会话槽」,**不代表它在播**。实测 Chrome 空闲后仍长期占着槽,而且槽里连曲名都没有(`owner=com.google.Chrome title=-`)。按「owner 变了就算被操作」记账,等于每次混音从静变响、每次启动首读,都把一次操作白送给这个僵尸;再加上多候选时「退而信 owner」的兜底,它还能在每次静→响时被反复加分。
+- **Prevention:** 三条一起改。① owner 换人必须**同时**满足「会话真的在播(`playbackRate != 0`)+ 会话的 bundleID 与 owner 一致 + owner 在出声列表里」才记账,空槽/僵尸一律不认;② 混音由静变响时**只有单一候选**才记账,多候选宁可不动(见 DEV-079),不要退而信 owner;③ 诊断日志打出每个候选「距今多久被记成刚被操作」(`pick=... [bid=2.3s ...]`),下次再出现「为什么显示它」直接看这行。
+- **验证:** 浏览器空闲占着槽 + QQ音乐在播时,`NowPlaying: pick=com.tencent.QQMusicMac [com.google.Chrome=从未 ...]`,卡片应显示 QQ音乐。
+- **仍存在的限制(见 DEV-081):** 显示对了,但点按钮**不一定控得到它**。
+
+## DEV-081: 媒体键无法定向,卡片显示和按钮实际控制对象可能不是同一个 app
+
+- **Pitfall:** 卡片显示 QQ音乐,点播放却把浏览器里的视频播起来了。
+- **Cause:** 播放控制只有一条通道——系统媒体键(`NX_KEYTYPE_PLAY`),它由 MediaRemote 分发给**当前 now playing owner**,调用方无法指定目标。实测排除的替代路径:① `MRMediaRemoteSendCommandToApp(cmd, nil, bundleID, nil)` 传 bundleID 直接 SIGSEGV(第 3 参不是 CFString,真实签名要 playerPath/私有授权);② `MRMediaRemoteSendCommand` 对不上报 Now Playing 的 app 无效;③ QQ音乐的播放控制栏在 AX 里是自绘 `AXUnknown`(`desc="播放"`、有精确 frame、但 `actions=[]`),按不动;④ 就算按 frame 用 `CGEvent.postToPid` 点,QQ 后台时 AX 树连窗口都不暴露(`AXWindows` 为 0,只有它自己在前台才可见),拿不到坐标。⑤ 给 owner 发 `stop` 也踢不掉槽(实测 owner 不变)。
+- **Prevention:** 目前**不做特殊处理**,只在 `send()` 里打一行诊断:`send togglePlay card=X owner=Y ⚠️不一致`。要不要把卡片改成「只显示按钮真正控得到的 app」,或者「显示最后操作的 app 但不可控时置灰」,是产品取舍,待定。
+- **代价:** 只要浏览器(或任何上报 Now Playing 的 app)占着会话槽,媒体键就一定先到它手上;想让 QQ音乐被控,只能等它自己成为路由目标。

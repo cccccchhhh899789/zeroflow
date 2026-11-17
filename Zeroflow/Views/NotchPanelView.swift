@@ -321,8 +321,14 @@ struct NotchContentView: View {
     /// 系统资源列自然宽度：两列主要项环（CPU/内存）之间的空白要放得下浮动的 GPU 小环，
     /// 读数行与通栏趋势线也需要横向空间（与日历卡片同宽 320，观感统一）
     private static let resourcesColumnWidth: CGFloat = 300
-    /// 正在播放列自然宽度
-    private static let musicColumnWidth: CGFloat = 224
+    /// 正在播放列自然宽度：曲名 + 歌手 + 进度 + 三个控制按钮要横着排开，太窄会挤成一团
+    private static let musicColumnWidth: CGFloat = 300
+    /// 正在播放卡片内容高度（固定）。轮询数据比面板弹出晚几十毫秒，
+    /// 按内容自适应测量会先测到空态高度，数据到达后内容就被裁掉（实测 108 高的卡片装不下 160 的内容）。
+    /// 130 = 顶栏 14 + 曲目行 28 + 频谱 18 + 进度 20 + 按钮 26 + 四段间距 24
+    private static let musicCardContentHeight: CGFloat = 130
+    /// 频谱条高度（含最大振幅），宽度撑满内容列
+    private static let spectrumStripHeight: CGFloat = 18
 
     /// 模块自然列宽（卡片宽 = 列宽 + 左右内边距，即卡片宽度不会超过此自然尺寸）
     static func naturalColumnWidth(for module: Module) -> CGFloat {
@@ -942,48 +948,70 @@ struct NotchContentView: View {
     // MARK: - 正在播放模块
 
     private func musicColumn(inner: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            moduleHeader("music.note", L10n.tr("正在播放"))
-            if let info = NowPlayingMonitor.shared.nowPlaying {
-                musicBody(info)
-            } else {
-                Text(L10n.tr("没有正在播放的音乐"))
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                    .padding(.top, 2)
-            }
-        }
-        .frame(width: inner)
-    }
-
-    private func musicBody(_ info: NowPlayingInfo) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                appIcon(info)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(info.appName ?? L10n.tr("未知应用"))
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "music.note")
+                    .font(.system(size: 10, weight: .medium))
+                // 左边放 app 名，右边放播放状态，避免「正在播放」出现两次
+                Text(NowPlayingMonitor.shared.nowPlaying?.appName ?? L10n.tr("正在播放"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                if let info = NowPlayingMonitor.shared.nowPlaying {
                     HStack(spacing: 4) {
                         Circle()
                             .fill(info.isPlaying ? Color.green : Color.secondary.opacity(0.5))
                             .frame(width: 5, height: 5)
                         Text(info.isPlaying ? L10n.tr("正在播放") : L10n.tr("已暂停"))
                             .font(.system(size: 10))
-                            .foregroundColor(.secondary)
                     }
                 }
             }
+            .foregroundColor(.secondary)
 
-            Text(info.title)
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(2)
+            if let info = NowPlayingMonitor.shared.nowPlaying {
+                musicBody(info)
+            } else {
+                Spacer(minLength: 0)
+                Text(L10n.tr("没有正在播放的音乐"))
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(width: inner, height: Self.musicCardContentHeight, alignment: .topLeading)
+    }
 
-            musicSubtitle(info)
+    private func musicBody(_ info: NowPlayingInfo) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Spacer(minLength: 6)
+
+            HStack(spacing: 10) {
+                appIcon(info)
+                VStack(alignment: .leading, spacing: 2) {
+                    // 拿不到曲名时 app 名顶上来当主标题
+                    Text(info.title ?? info.appName ?? L10n.tr("未知应用"))
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(1)
+                    if let subtitle = musicSubtitle(info) {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+
+            Spacer(minLength: 6)
+
+            spectrumStrip(info)
+
+            Spacer(minLength: 6)
 
             if let progress = musicProgress(info) {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.primary.opacity(0.15))
@@ -1003,31 +1031,56 @@ struct NotchContentView: View {
                 }
             }
 
-            HStack(spacing: 18) {
-                musicButton("backward.fill", L10n.tr("上一首"), disabled: !NowPlayingMonitor.shared.controlsAvailable) {
+            Spacer(minLength: 6)
+
+            HStack(spacing: 32) {
+                // .none 说明这个 app 既不上报 Now Playing 也不是当前 owner，媒体键会打到别人身上
+                musicButton("backward.fill", L10n.tr("上一首"), disabled: info.control == .none) {
                     NowPlayingMonitor.shared.send(.previous)
                 }
                 musicButton(info.isPlaying ? "pause.fill" : "play.fill",
                             info.isPlaying ? L10n.tr("暂停") : L10n.tr("播放"),
-                            disabled: !NowPlayingMonitor.shared.controlsAvailable) {
+                            disabled: info.control == .none) {
                     NowPlayingMonitor.shared.send(.togglePlay)
                 }
-                musicButton("forward.fill", L10n.tr("下一首"), disabled: !NowPlayingMonitor.shared.controlsAvailable) {
+                musicButton("forward.fill", L10n.tr("下一首"), disabled: info.control == .none) {
                     NowPlayingMonitor.shared.send(.next)
                 }
             }
             .frame(maxWidth: .infinity)
+
+            Spacer(minLength: 0)
         }
     }
 
-    @ViewBuilder private func musicSubtitle(_ info: NowPlayingInfo) -> some View {
-        let parts = [info.artist, info.album].compactMap { $0 }
-        if !parts.isEmpty {
-            Text(parts.joined(separator: " · "))
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
+    /// 真实音频频谱：16 段对数频带，跟着系统混音律动；暂停或没抓到音频时压成一条基线。
+    /// 数据来自 `AudioSpectrumMonitor`（ScreenCaptureKit 音频捕获 → vDSP FFT），
+    /// 只在这个卡片宿主里被观察，所以 30fps 的重绘不会波及日历/资源卡（见 DEV-050）。
+    private func spectrumStrip(_ info: NowPlayingInfo) -> some View {
+        let levels = AudioSpectrumMonitor.shared.levels
+        let live = info.isPlaying && AudioSpectrumMonitor.shared.isCapturing
+        return HStack(alignment: .bottom, spacing: 0) {
+            ForEach(0..<AudioSpectrumMonitor.bandCount, id: \.self) { index in
+                let level = index < levels.count ? levels[index] : 0
+                // 最矮 2pt：静音时也留一条基线，卡片不会突然空一块
+                let barHeight = 2 + level * (Self.spectrumStripHeight - 2)
+                Capsule()
+                    .fill(
+                        LinearGradient(colors: [accent.opacity(0.95), accent.opacity(0.45)],
+                                       startPoint: .bottom, endPoint: .top)
+                    )
+                    .frame(width: 6, height: barHeight)
+                    .frame(maxWidth: .infinity)
+            }
         }
+        .frame(height: Self.spectrumStripHeight, alignment: .bottom)
+        .opacity(live ? 1 : 0.3)
+        .animation(.easeOut(duration: 0.2), value: live)
+    }
+
+    private func musicSubtitle(_ info: NowPlayingInfo) -> String? {
+        let parts = [info.artist, info.album].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func musicProgress(_ info: NowPlayingInfo) -> Double? {
@@ -1054,7 +1107,7 @@ struct NotchContentView: View {
                     .foregroundColor(.secondary)
             }
         }
-        .frame(width: 22, height: 22)
+        .frame(width: 28, height: 28)
     }
 
     private static func icon(forBundleID bid: String) -> NSImage? {
@@ -1062,16 +1115,7 @@ struct NotchContentView: View {
     }
 
     private func musicButton(_ symbol: String, _ label: String, disabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(disabled ? Color.secondary.opacity(0.4) : .primary)
-                .frame(width: 26, height: 22)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
-        .help(label)
+        MusicControlButton(symbol: symbol, label: label, disabled: disabled, action: action)
     }
 
     private func moduleHeader(_ icon: String, _ title: String) -> some View {
@@ -1237,8 +1281,65 @@ private struct ResourceCardHost<Content: View>: View {
     var body: some View { content() }
 }
 
+/// 播放控制按钮：动作走 `Button`，按下视觉走手势。
+///
+/// 不能只靠 `ButtonStyle.isPressed` 做反馈——触控板「轻点即点击」会在同一帧里
+/// down+up，按下态一闪而过，弹簧动画一帧都跑不出来（表现为只有真按住才看得到动画）。
+/// 这里让按下态至少可见 `minPressDuration`，轻点也能看到一次完整的按下→回弹。
+private struct MusicControlButton: View {
+    let symbol: String
+    let label: String
+    let disabled: Bool
+    let action: () -> Void
+
+    @State private var pressed = false
+    @State private var releaseTask: DispatchWorkItem?
+
+    private static let minPressDuration: TimeInterval = 0.12
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(disabled ? Color.secondary.opacity(0.4) : .primary)
+                .frame(width: 32, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(label)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(pressed ? 0.16 : 0))
+        )
+        .scaleEffect(pressed ? 0.84 : 1)
+        .animation(.spring(response: 0.18, dampingFraction: 0.55), value: pressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in pressDown() }
+                .onEnded { _ in pressUp() }
+        )
+    }
+
+    private func pressDown() {
+        guard !disabled else { return }
+        releaseTask?.cancel()
+        releaseTask = nil
+        pressed = true
+    }
+
+    private func pressUp() {
+        guard pressed else { return }
+        let task = DispatchWorkItem { pressed = false }
+        releaseTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.minPressDuration, execute: task)
+    }
+}
+
 private struct MusicCardHost<Content: View>: View {
     @ObservedObject private var monitor = NowPlayingMonitor.shared
+    // 频谱 30fps 更新，必须跟着卡片宿主走，挂到顶层会把日历月网格一起重算（见 DEV-050）
+    @ObservedObject private var spectrum = AudioSpectrumMonitor.shared
     let content: () -> Content
 
     var body: some View { content() }

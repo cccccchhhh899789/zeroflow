@@ -11,6 +11,13 @@ struct ZeroflowMain {
         _ = CGSWindowServer.shared.isAvailable
         // 辅助功能权限缓存：从系统设置返回时立即复核
         AccessibilityPermission.startObserving()
+        // 调试开关：主动弹「辅助功能」「屏幕录制」两个系统授权窗（ZEROFLOW_REQUEST_PERMISSIONS=1）
+        if ProcessInfo.processInfo.environment["ZEROFLOW_REQUEST_PERMISSIONS"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                AccessibilityPermission.requestAuthorization()
+                ScreenRecordingPermission.requestAuthorization()
+            }
+        }
         // 消化 Finder 扩展转交的「访达自定义命令」（见 Services/FinderCommandRunner.swift）
         FinderCommandRunner.shared.start()
         app.run()

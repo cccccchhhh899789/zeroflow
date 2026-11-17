@@ -374,3 +374,97 @@
   还有：**圆角裁剪要挪到宿主 layer**（`container.layer.cornerRadius + masksToBounds`），不能留在 821 宽的 SwiftUI 内容上——内容恒定 821 而收起态窗口只有 360，画在内容上的圆角会跑到窗口外面，右边缘变直角。
 - **代价:** hosting 定宽 821 让 backing store 变成窗口的 2.3 倍（2x 屏 821×422 约 5.5MB），面板 dismiss 时随内容树一起释放。窗口生长期间 hosting 每帧 `layout()` 仅 0.05–0.10ms（布局缓存命中；实测 60 帧共 1.38ms、单帧最大 0.09ms），首次插入约 3ms。
 - **验证:** `ZEROFLOW_CLIPBOARD_DEBUG=1` 启动，日志应只有一条 `frame -> ... preview=true ... animated=true`（幂等守卫挡住两条入口重复起手），并跟一条 `preview prerender ...`；收起态应看到完整列表（搜索栏 + 全部行 + 底栏）而不是半截。抽屉方向可在动画中途抓帧核对（`ZEROFLOW_PANEL_SNAPSHOT` 把延时调到 80ms）：右展开中途应是「列表完整在左 + 预览从右边露出一截」，左展开中途应是「预览从左边露出一截 + 列表完整在右」，两边都不该出现拉伸或错位。若又闪了，依次查：根视图是否被改回 `.frame(maxWidth: .infinity)`（内容跟着窗口逐帧重排）、hosting 是否又被改成跟随窗口宽度（预览列没被光栅化）、对齐是否用了 `.frame(alignment:)` 而不是 `overlay(alignment:)`（内容被居中裁切）、`pinHosting` 是否还跟着 `previewSide` 切边。
+
+## DEV-069: 系统 Now Playing 对第三方 app 是空的,「正在播放」必须另配 CoreAudio 出声探测
+
+- **Pitfall:** 灵动岛「正在播放」卡片对 QQ音乐、语音备忘录永远显示「没有正在播放的音乐」,而对 Chrome 却常年显示一个早已不存在的会话。用户报「没什么支持的」,看起来像读取 API 失效,实际是数据源根本不存在。
+- **Cause:** macOS 的 Now Playing 是**单一共享槽位**,只有 app 主动向 `MPNowPlayingInfoCenter` 上报才有数据。实测 macOS 27.2.1:QQ音乐(`com.tencent.QQMusicMac`)和语音备忘录(`com.apple.VoiceMemos`)播放中,`MRMediaRemoteGetNowPlayingClients` 返回**空数组**、`MRMediaRemoteGetNowPlayingApplicationPID` 返回 0、`MRNowPlayingRequest.localNowPlayingItem` 为 nil;与此同时 `localNowPlayingPlayerPath` 仍指向一个 Chrome 的 **paused 僵尸会话**(空闲后不释放,`localPlaybackState` 恒为 2)。即:读不到不是 API 被封,而是这两个 app 压根不上报;僵尸会话还会让「谁是当前播放器」的判断被带偏。
+- **Prevention:** 双源合并,`NowPlayingMonitor.read()`:
+  ① **MediaRemote 优先**:拿到 item 且其 bundleID 出现在出声列表里(或出声列表为空,可能是暂停态)→ 用完整信息(标题/歌手/进度,`canControl = true`)。
+  ② **CoreAudio 兜底**:`kAudioHardwarePropertyProcessObjectList` + `kAudioProcessPropertyIsRunningOutput == 1` 枚举正在出声的进程(macOS 14+ 公开 API,实测能准确抓到 QQ音乐与语音备忘录),用 `NSRunningApplication` 取 bundleID/localizedName 做降级展示,`canControl = false`。
+  ③ **过滤**:`activationPolicy == .prohibited` 的守护进程(audiomxd/CoreSpeech/assistantd 等在列表里但不算 app)、自身 bundleID 全部剔除;已知音乐类 bundle 排在前面,避免浏览器视频抢位。
+  ④ **僵尸会话判定**:media 的 app 不在出声列表而**另有 app 在出声**时,丢弃 media 改用出声方——否则 Chrome 空闲会话会让卡片一直显示 Chrome 的旧内容。
+- **代价:** 降级路径拿不到曲名/歌手/进度,暂停时 CoreAudio 输出归零,卡片要等 `staleLimit`(3 次轮询 ≈6s)才清空,无法显示「已暂停」。
+- **验证:** `ZEROFLOW_NOTCH_DEBUG=1 ZEROFLOW_NOWPLAYING_DEBUG=1` 启动(后者让轮询脱离面板模块独立运行),播放 QQ音乐应看到 `NowPlaying: audio-only app=com.tencent.QQMusicMac ...`;播放 Music.app 应看到 `NowPlaying: media app=com.apple.Music sounding=true`。
+
+## DEV-070: MRMediaRemoteSendCommand 的 C 签名是 2 个参数,写错会在 macOS 27 上崩溃
+
+- **Pitfall:** 灵动岛「正在播放」的上一首/播放/下一首按钮按下去 app 直接崩溃:`NSInvalidArgumentException: -[NSObject mutableCopyWithZone:]: unrecognized selector sent to instance`。
+- **Cause:** 原实现把符号声明成 `@convention(c) (UInt, AnyObject, DispatchQueue, AnyObject?) -> Void`(4 参数),实际签名是 `void MRMediaRemoteSendCommand(MRMediaRemoteCommand cmd, CFDictionaryRef options)`(2 参数)。多余参数在 arm64 上被忽略,于是 `options` 位置收到的是 `MRNowPlayingRequest` **类对象**;框架内部 `MRMediaRemoteResolveCommandOptions` 会对它调 `mutableCopyWithZone:`,直接抛异常。
+- **Prevention:** 按真实签名声明 `@convention(c) (UInt32, CFDictionary?) -> Void`,调用传 `fn(UInt32(command.rawValue), nil)`(实测不再崩溃)。另外**不要用 `controlsAvailable` 决定按钮是否可点**——符号存在不代表目标 app 收得到命令:只有上报 Now Playing 的 app 才是 command handler,CoreAudio 兜底出来的 QQ音乐/语音备忘录必须靠 `NowPlayingInfo.control` 置灰。
+
+## DEV-071: 不上报 Now Playing 的 app 只能用系统媒体键控制,而且必须是 now playing owner
+
+- **Pitfall:** QQ音乐不上报 Now Playing,`MRMediaRemoteSendCommand` 对它无效。逐条试下来:媒体键 `NX_KEYTYPE_PLAY` 第一次也无效,但换了个时机再试却成功了——说明不是通道不通,是**命令被别的 app 吃掉了**。
+- **Cause:** macOS 的媒体键不走 CGEventTap,而是走 MediaRemote 的 command 分发,只发给**当前 now playing owner**。实测当时 `localNowPlayingPlayerPath` 指向一个 Chrome 的空闲会话(Chrome 早就不播了但不释放),所有媒体键都被 Chrome 收走;后来通过一次激活把 owner 切到 QQ音乐后,三个键立刻全部生效(PLAY 暂停→播放、NEXT 切歌、PREVIOUS 切回,曲名用 AX 读出来逐次核对过)。另外这些 app 的播放控制栏在 AX 里是自绘 `AXUnknown`(`AXPress` 返回 `actionUnsupported -25206`),菜单栏「播放控制」菜单虽然有 `AXPress`,但**后台 app 的菜单栏项不响应**(`activate` 之后才行),所以坐标点击是唯一能"点"到它的方式——代价是必须抢前台,体验不可接受。
+- **Prevention:** 控制通道做成三态 `ControlChannel`:
+  ① `.mediaRemote` —— 上报了 Now Playing,发 `MRMediaRemoteSendCommand`;
+  ② `.mediaKey` —— 不上报,但 `localNowPlayingPlayerPath` 的 bundleID 与目标 app 一致,发 `NX_KEYTYPE_PLAY/NEXT/PREVIOUS`(16/17/18,`NSEvent.otherEvent(.systemDefined, subtype: 8, data1: key<<16 | 0xa<<8)`,down/up 各发一次);
+  ③ `.none` —— 既不上报也不是 owner,**必须置灰**:此时发媒体键会打到别的 app 身上,是最坏的结果。
+  曲名同理别依赖窗口标题(窗口一关就没),读 AX 播放控制栏的 `AXDescription`:`歌曲名：虚拟 - 歌手名：陈粒`,按 ` - 歌手名：` 切分即可;`AXUIElementSetMessagingTimeout(app, 1.0)` 防止 app 无响应时把轮询队列卡 6s。
+- **未解:** 媒体键是 toggle 语义且全局,Zeroflow 无法指定目标;owner 一旦被别人抢走,按钮就会置灰。语音备忘录等原生 app 的 AX 结构尚未验证(可能有真正的 `AXPress` 按钮,能走更稳的通道)。
+
+## DEV-072: 暂停即「消失」——CoreAudio 出声探测对暂停态是瞎的
+
+- **Pitfall:** 从卡片上点暂停,卡片立刻变成「没有正在播放的音乐」——三个按钮跟着一起没了,用户再也点不回去,只能去 app 里手动恢复。
+- **Cause:** `kAudioProcessPropertyIsRunningOutput` 在暂停的瞬间就变成 0,`AudioActivityMonitor.activeApps()` 返回空;而 QQ音乐/语音备忘录这类不上报 Now Playing 的 app 在 `MRNowPlayingRequest.localNowPlayingItem` 里本来就是 nil。于是 `read()` 两个源同时为空 → 返回 nil → 轮询的 `staleLimit`(3 次 ≈6s)把 `nowPlaying` 清空。注意**暂停时 `localNowPlayingPlayerPath` 仍然指向该 app**(实测 `owner=com.tencent.QQMusicMac`),这正是键盘上的播放键能把暂停的 app 唤醒的原因,也是唯一还活着的线索。
+- **Prevention:** `NowPlayingMonitor` 里维护 `lastAudioApp`(pid/bundleID/name),两条兜底:
+  ① 出声列表空了但记忆里的 app 还在跑、且 owner 仍是它 → 输出 `isPlaying = false` 的 `NowPlayingInfo`,control 照旧按 owner 判定(实测暂停后仍是 `.mediaKey`,按钮可点);
+  ② 进程刚启动 / 面板没开过、没有记忆时,直接按 `localNowPlayingPlayerPath` 的 bundleID 找运行中的 app 补出「已暂停」——效果与系统控制中心一致。
+  反向约束:owner 已换成别的 app 时**不要**硬留(说明别处接管了播放),清掉记忆返回 nil。
+- **验证:** 播放 QQ音乐 → 点卡片中间按钮暂停 → 卡片应显示「● 已暂停」+ 曲名仍在 + 频谱压成基线 + 按钮仍可点;再点一次应立刻恢复(`NowPlaying: sent togglePlay via mediaKey` 后紧跟 `audio-only ... owner=true`)。日志里暂停态会打 `NowPlaying: paused app=... control=mediaKey` 或 `paused(owner) app=...`。
+
+## DEV-073: 卡片里的「真实频谱」只能走 ScreenCaptureKit,而且必须自适应归一化
+
+- **Pitfall:** 想给「正在播放」卡片加律动效果,三种看起来都能拿到音频的路,只有一条真的出声:CoreAudio process tap 建得成功、IOProc 也在跑,但读出来全是静音;ScreenCaptureKit 从 CLI 直接跑会报 `-3801 用户拒绝`;而算出来的 FFT 幅值又是绝对量纲,直接线性映射会全满格或全灭。
+- **Cause:** ① **process tap**(`CATapDescription(stereoMixdownOfProcesses:)` + `AudioHardwareCreateProcessTap` + 聚合设备)需要单独的音频捕获授权,**不弹窗、静默失败**:`status=0`、`tapID` 有值、IOProc 触发上百次,但 `maxAbs = 0.0`。② **ScreenCaptureKit 的音频轨**复用「屏幕录制」授权,容器 app 已有该授权,所以只有经 LaunchServices 启动(`open -a`)的 app 能跑通,shell 里 exec 二进制会因 TCC 归属不同被拒。③ FFT 幅值随音量/设备差几十 dB,固定阈值必然失真。
+- **Prevention:** `AudioSpectrumMonitor` 的做法:
+  ① 数据源:`SCContentFilter(display:excludingWindows:)` + `config.capturesAudio = true` + `excludesCurrentProcessAudio = true`(防自激),视频轨压到 16×16@1fps(SCK 不允许只开音频)。
+  ② 取样本用 `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer` 拿第一声道,再按 `mNumberChannels` 跳采——**不要**假设 planar 或 interleaved,直接 `CMBlockBufferGetDataPointer` 在非连续块上会失败。
+  ③ FFT:1024 点 + Hann 窗 + `vDSP_fft_zrip` + `vDSP_zvabs`,按 `pow(half, b/16)` 对数分桶取均值。
+  ④ 归一化:**滚动峰值当参考顶**(立刻跟随更高峰、每帧最多回落 0.4dB),显示范围 `参考顶 - 42dB`,再叠 **9dB 高频补偿**(音乐能量集中在低频,不补偿右半边永远平着);数字静音(`topDb <= -100`)直接衰减到 0,否则参考顶会一路掉、把底噪抬成满格。
+  ⑤ 包络:上升直接跟随、下落 `0.75/0.25` 混合;发布限 30fps(`CFAbsoluteTimeGetCurrent` 卡时间戳),FFT 在音频回调队列算完再回主线程赋值。
+  ⑥ SwiftUI 侧 30fps 重绘**必须挂在卡片宿主**(`MusicCardHost` 同时观察 `NowPlayingMonitor` 和 `AudioSpectrumMonitor`),挂到顶层会把日历月网格一起重算(同 DEV-050)。
+- **代价:** 频谱只在音乐模块显示期间跑(`setActive` 与模块联动),面板收起即停流;首次起流有几百毫秒延迟,刚弹出时是平条。
+- **验证:** `defaults write com.zeroflow.app notchAutoShow -bool true` + `notchModule=music` + `notchSnapshot=/tmp/x.png` 后 `open -a`,播放音乐抓图应看到 16 段高低错落的橙色条;暂停后应压成一条基线(不透明度 0.3)。日志出现 `Spectrum: 已启动` 即起流成功,失败会打 `Spectrum: 启动失败 ...`(多半是屏幕录制授权)。
+
+## DEV-074: 触控板「轻点即点击」下 `ButtonStyle.isPressed` 一闪而过,按下动画等于没有
+
+- **Pitfall:** 灵动岛播放控制按钮,用触控板轻点(点按无需按下)能触发动作,但完全看不到按下反馈;只有真的按住鼠标才看得到缩放动画。用户报「功能没问题,就是点了没感觉」。
+- **Cause:** 轻点在同一帧里先后投递 mouseDown/mouseUp,`configuration.isPressed` 在 SwiftUI 合并状态更新时直接 true→false,`spring(response: 0.18)` 一帧都没跑就被打断,视觉上等于没变。
+- **Prevention:** 按下态要有**最短可见时长**:动作仍交给 `Button`(命中/禁用/`.help` 都不用手写),视觉用 `simultaneousGesture(DragGesture(minimumDistance: 0))` 的 `onChanged` 点亮、`onEnded` 排一个 `asyncAfter(0.12)` 再熄灭。这样无论 down/up 多近,至少渲染出一次按下→回弹。
+- **验证:** 轻点(不按下)中间按钮,应看到缩小 + 淡底再弹回;把 `minPressDuration` 调到 0 可复现「点了没反应」。
+
+## DEV-075: 出声探测 ≠ 在播放,而且 helper 进程的 bundleID 与媒体会话对不上
+
+- **Pitfall:** ① 从卡片暂停 QQ音乐后,中间按钮的图标一直是「暂停」(说明它以为还在播),再点也没法回到播放态;② 暂停 QQ音乐后去播浏览器视频,卡片仍然显示 QQ音乐的图标/曲名,但三个按钮实际控的是浏览器。
+- **Cause:** ① `kAudioProcessPropertyIsRunningOutput` 在暂停后**不一定归零**(app 仍占着输出流),`read()` 的兜底分支又写死 `isPlaying = true`,于是永远判成播放中,永远走不到「已暂停」兜底(DEV-072 那条只在流真的关掉时生效)。② 音频输出常跑在 helper 进程上(Chrome 的音频服务是 `com.google.Chrome.helper`),媒体会话却记在宿主 bundle(`com.google.Chrome`):`media.appBundleID` 与出声列表精确比对必然失败 → 正在播视频的 Chrome 被判成「僵尸会话」丢掉;退回出声列表后又按 `mediaRank` 把已知音乐 app 排第一,占着流的 QQ音乐继续压过 Chrome。而媒体键按「实际在播的会话」路由,于是出现「卡片显示 QQ音乐、按钮控的是浏览器」。
+- **Prevention:**
+  ① **播放态直接由「有没有声音」驱动,不要轮询去猜**:`AudioSpectrumMonitor` 暴露 `@Published isAudible`(系统混音超过 `silenceDb + 10` 算有声,带 0.35s 保持防淡出闪断),`NowPlayingMonitor` 在 init 里用 Combine 订阅它——电平一落平就地把 `nowPlaying.isPlaying` 翻成 false,一有声就翻回 true,**不经过 2s 轮询**。`read()` 只用 `audible` 给兜底来源赋初值,`audible == nil`(没在捕获 = 不知道)时才退回 `true`,否则没屏幕录制权限会一律显示「已暂停」。
+  ② **别做乐观翻转**:早先版本在 `send(.togglePlay)` 后本地翻状态再挂 4s 窗口,结果和轮询互相打架(用户报「经常出错」)。电平信号本身就是真相且 0.35s 内到位,直接以它为准,少一层猜测就少一类 bug。**并且轮询结果落地时必须按当前电平再校一次**(`publish()` 里做),否则后台队列里读到的旧值会把 `applyAudible` 刚翻好的状态盖回去——症状是「点了播放图标闪一下又变回暂停」。
+  ③ **静音时要有人推进状态**:SCK 在完全静音时可能不再投递音频 buffer,`analyze()` 不跑,`isAudible` 就永远停在 true(实测停了 4.5s 才被别的声音事件纠正)。捕获期间挂一个 10Hz 主线程计时器重算 `lastAudibleFrame` 的过期,状态才能自己落回暂停。
+  ④ **出声进程不一定能查到 app**:Chrome 的音频 helper 没在 LaunchServices 注册,`NSRunningApplication(processIdentifier:)` 直接返回 **nil**(实测 lsBundle=nil、pathBundle=com.google.Chrome.helper),旧代码 `guard let raw = ... else { continue }` 把整条记录丢掉,症状是「明明有声音,actives 是空的」→ 只能退回 owner 兜底、判成暂停。改成 `proc_pidpath` 从可执行路径取最内层 `.app` 的 bundleID,再交给 `hostApp` 归并到宿主。
+  ⑤ **由静变响要立刻补查**:`applyAudible(true)` 顺带 `tick()`(0.5s 限流),否则「切到浏览器视频」要等下一个 2s 轮询才换卡片,用户体感是「切换有点慢」。
+  ⑥ **bundle 比对改成家族匹配**:`sameApp(a,b)` = 相等或互为 `.` 前缀(`com.google.Chrome.helper` ↔ `com.google.Chrome`);`AudioActivityMonitor` 把 helper 归并到宿主 app(取最长前缀的 `.regular` 进程),用宿主 pid 读 AX/窗口标题,并按 bundleID 去重。守护进程过滤也从「要求非 `.prohibited`」改成「归并后仍 `.prohibited` 才丢」——helper 的 `activationPolicy` 本身可能就是 `.prohibited`,旧写法会把它们一起过滤掉。
+  ⑦ **WebKit 宿主按名字认**:QQ音乐是 WebKit 播放器,音频可能跑在 `com.apple.WebKit.GPU` 上,bundle 前缀归并不出来,只能靠进程名「<宿主> Graphics and Media」前缀匹配宿主 app。
+  ⑧ **owner 优先排序**:`activeApps(owner:)` 把 `localNowPlayingPlayerPath` 指向的 app 排最前,`mediaRank` 只当同级 tiebreaker。
+  ⑨ **控制按钮别只认 owner**:owner 经常被别的 app 的残留会话占着(浏览器空闲不释放),这时只要目标是**唯一在出声的 app**,媒体键仍会按「有声的会话」路由过去,`control` 用 `isOwner || actives.count == 1` 判 `.mediaKey`,否则 QQ音乐在播也会被置灰成摆设(用户实测反馈)。
+  ⑩ **「出声列表空」不等于暂停**:空列表时用 `audible` 区分——有声就按 owner 展示成在播,没声才判暂停(早先版本无条件判暂停,有声时会被轮询反复打回「已暂停」)。
+- **代价:** 系统音量调到 0 / 输出静音时会被判成「已暂停」;媒体会话为 nil、owner 是陈旧会话、且出声探测也漏掉进程时,仍分不清谁在响。
+- **验证:** `defaults write com.zeroflow.app notchDebug -bool true` 后复现:日志里 `actives=[...]` 应随播放/暂停出现和消失(Chrome 播放时应是 `com.google.Chrome`);点暂停 → `audible=false 当前=.../true` 紧跟一次翻转,图标 0.5s 内变播放;播浏览器视频 → 立刻(不等 2s)出现 `media app=com.google.Chrome sounding=true` 或 `audio-only app=com.google.Chrome`。命令行可复现出声探测:`afplay /System/Library/Sounds/Submarine.aiff` 期间跑 CoreAudio 枚举应看到该 pid 的 `runningOutput=1`。
+- **代价:** 系统音量调到 0 / 输出静音时会被判成「已暂停」;媒体会话为 nil 且 owner 是陈旧会话时,仍分不清两个同时「占着流」的 app 谁在响。
+- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`(或 `ZEROFLOW_NOTCH_DEBUG=1`)后复现:播放 QQ音乐 → 卡片 `audio-only ... silent=false`;点暂停 → 图标立刻变播放,2s 后日志 `audio-only ... silent=true` 且状态保持「已暂停」;再播浏览器视频 → 日志应为 `media app=com.google.Chrome sounding=true`(或 `audio-only app=com.google.Chrome`),卡片换成浏览器图标与页面标题。
+
+## DEV-076: 两个 app 都暂停时,卡片会跟着「谁抢到媒体会话」乱跳
+
+- **Pitfall:** QQ音乐和浏览器都暂停时,把浏览器切到前台(或它加载了视频但没播),卡片就从 QQ音乐跳到浏览器;反向(切回 QQ音乐窗口)却不跳。用户要的是:只有真的开始播才换卡片。
+- **Cause:** `read()` 里有一条 `actives.isEmpty → return media`——没人在出声时直接用系统 Now Playing 的会话。但媒体会话是**单槽**,浏览器一加载视频就把槽抢过去(哪怕没播),于是卡片跟着它跑。而 QQ音乐不上报,永远抢不回这个槽。
+- **Prevention:** 在 `read()` 最前面加一条「锁」:没声音(`audible != true`)且出声列表为空时,只要 `lastAudioApp` 还在跑就直接返回它,不看 `media`、不看 owner。真的出声时(`audible == true`)这条自动失效,卡片才换人——正好对上「点了播放才切」。同时暂停态的 `control` 一律给 `.mediaKey`,否则被锁住的那张卡片按钮是灰的,用户点不回去。
+- **代价:** 静音播放(系统音量 0、视频本身静音)时卡片不会切过去——没有声音就没有依据。
+
+## DEV-077: 暂停态的图标要跟手,数字静音必须走快速通道
+
+- **Pitfall:** 点暂停后图标要等 0.35s 的静音保持期才翻成「播放」,而按钮的按下动画(0.12s + 弹簧)早跑完了,观感是「动画结束了图标才变」;播放方向却是按下当帧就翻,两个方向不对称。
+- **Cause:** `isAudible` 只有「0.35s 没声音」这一个判据,而暂停是**立刻**发生的,0.35s 纯粹是白等。保持期本来是为了挡曲间空隙/淡出。
+- **Prevention:** 加第二条判据:连续 3 帧(≈100ms)出现**数字静音**(`topDb <= silenceDb`,只有真正停掉输出才有)就直接判 `audible = false`,不走保持期;保持期只兜「有底噪但很轻」的模糊情况。两条判据合成 `audibleNow`,回调路径和 10Hz 兜底计时器共用。
+- **验证:** `afplay /System/Library/Sounds/Submarine.aiff` 结束时日志里的 `audible=false` 应与结束时刻相差 <100ms(实测 0~100ms),图标在按下动画还没结束时就翻过去。

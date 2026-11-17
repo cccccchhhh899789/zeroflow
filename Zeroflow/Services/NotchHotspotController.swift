@@ -30,10 +30,14 @@ final class NotchHotspotController {
     static let didChangeNotification = Notification.Name("zeroflow.notchDidChange")
 
     private static let debug = ProcessInfo.processInfo.environment["ZEROFLOW_NOTCH_DEBUG"] == "1"
+        || UserDefaults.standard.bool(forKey: "notchDebug")
     private static let fakeNotch = ProcessInfo.processInfo.environment["ZEROFLOW_NOTCH_FAKE"] == "1"
     /// `ZEROFLOW_NOTCH_SHOW=1`：启动 1.5s 后直接弹出面板（绕过悬停，调动画用）；
     /// 该模式下指针移出不会自动收起（否则鼠标一动面板就没了），Esc / 区域外点击仍可收起
+    /// 同名的 defaults 键 `notchAutoShow` 也认：TCC 授权是绑在 LaunchServices 启动的 app 上的，
+    /// 要验「需要权限」的路径必须 `open -a` 启动，而 `open` 不转发环境变量
     private static let autoShow = ProcessInfo.processInfo.environment["ZEROFLOW_NOTCH_SHOW"] == "1"
+        || UserDefaults.standard.bool(forKey: "notchAutoShow")
 
     /// 热区对刘海的左右外扩
     private static let hotspotMargin: CGFloat = 12
@@ -143,6 +147,13 @@ final class NotchHotspotController {
         thread = t
         t.start()
         ZSLog("Notch: started")
+
+        // 调试开关:面板没显示也要把「正在播放」轮询跑起来,便于单独核对数据源
+        // (环境变量 ZEROFLOW_NOWPLAYING_DEBUG=1,或 defaults write com.zeroflow.app nowPlayingDebug -bool true)
+        if ProcessInfo.processInfo.environment["ZEROFLOW_NOWPLAYING_DEBUG"] == "1"
+            || UserDefaults.standard.bool(forKey: "nowPlayingDebug") {
+            _ = NowPlayingMonitor.shared
+        }
 
         if Self.autoShow {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
@@ -475,8 +486,21 @@ final class NotchHotspotController {
         lock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.presentPanel(showGen: gen)
+            if let path = Self.snapshotPath {
+                // 2.5s 而不是 1.5s：频谱（ScreenCaptureKit）起流要几百毫秒，抓早了只能看到空条
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    self?.snapshotPanel(to: path)
+                }
+            }
         }
     }
+
+    /// `ZEROFLOW_NOTCH_SNAPSHOT=<path>`（或 defaults 键 `notchSnapshot`）：
+    /// 面板弹出 1.5s 后把内容离屏抓成 PNG（不依赖截屏权限，用来核对排版）
+    private static let snapshotPath: String? = {
+        if let path = ProcessInfo.processInfo.environment["ZEROFLOW_NOTCH_SNAPSHOT"] { return path }
+        return UserDefaults.standard.string(forKey: "notchSnapshot")
+    }()
 
     /// 移出热区/点击热区外时作废在途悬停 show
     private func cancelPendingShow() {
@@ -511,6 +535,7 @@ final class NotchHotspotController {
             self.model = nil
             SystemResourceMonitor.shared.setActive(false)
             NowPlayingMonitor.shared.setActive(false)
+            AudioSpectrumMonitor.shared.setActive(false)
             // 视觉收起交给面板：弹簧缩回刘海再 orderOut；期间再 present 会无缝续接展开
             if let notchTL {
                 self.panel?.dismiss(notchTL: notchTL)
@@ -563,9 +588,38 @@ final class NotchHotspotController {
     /// 会话内选择的显示模块；被禁用/失效时回退默认（日历优先，无启用模块 = nil → 空状态）
     private func currentSelectedModule() -> NotchContentView.Module? {
         let enabled = NotchContentView.enabledModules
+        // 调试：强制显示某个模块，便于截图核对单个卡片的排版
+        if let forced = Self.forcedModule, enabled.contains(forced) {
+            selectedModule = forced
+            return forced
+        }
         if let selected = selectedModule, enabled.contains(selected) { return selected }
         selectedModule = NotchContentView.defaultModule
         return selectedModule
+    }
+
+    /// `ZEROFLOW_NOTCH_MODULE=music|calendar|resources`（或 defaults 键 `notchModule`）强制选中模块
+    private static let forcedModule: NotchContentView.Module? = {
+        let raw = ProcessInfo.processInfo.environment["ZEROFLOW_NOTCH_MODULE"]
+            ?? UserDefaults.standard.string(forKey: "notchModule")
+        switch raw {
+        case "music": return .music
+        case "calendar": return .calendar
+        case "resources": return .resources
+        default: return nil
+        }
+    }()
+
+    /// `ZEROFLOW_NOTCH_SNAPSHOT=<path>` 把面板内容离屏抓成 PNG（无截屏权限时也能核对排版）
+    private func snapshotPanel(to path: String) {
+        guard let panel, let view = panel.contentView else {
+            ZSLog("Notch: snapshot 无窗口"); return
+        }
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return }
+        try? data.write(to: URL(fileURLWithPath: path))
+        ZSLog("Notch: snapshot -> \(path) size=\(view.bounds.size)")
     }
 
     /// 顶部箭头 / 双指左右滑动：按启用模块顺序循环切到上一张（-1）或下一张（+1）
@@ -600,6 +654,9 @@ final class NotchHotspotController {
     private func updateMonitors() {
         SystemResourceMonitor.shared.setActive(selectedModule == .resources)
         NowPlayingMonitor.shared.setActive(selectedModule == .music)
+        // 频谱走 ScreenCaptureKit 抓系统混音，只在「正在播放」卡片在场时开，
+        // 收起面板立刻停（面板是悬停即现的，常开等于一直在录屏音频）
+        AudioSpectrumMonitor.shared.setActive(selectedModule == .music)
     }
 
     private func ensurePanel() -> NotchPanel {

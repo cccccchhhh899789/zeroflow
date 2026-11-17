@@ -468,3 +468,28 @@
 - **Cause:** `isAudible` 只有「0.35s 没声音」这一个判据,而暂停是**立刻**发生的,0.35s 纯粹是白等。保持期本来是为了挡曲间空隙/淡出。
 - **Prevention:** 加第二条判据:连续 3 帧(≈100ms)出现**数字静音**(`topDb <= silenceDb`,只有真正停掉输出才有)就直接判 `audible = false`,不走保持期;保持期只兜「有底噪但很轻」的模糊情况。两条判据合成 `audibleNow`,回调路径和 10Hz 兜底计时器共用。
 - **验证:** `afplay /System/Library/Sounds/Submarine.aiff` 结束时日志里的 `audible=false` 应与结束时刻相差 <100ms(实测 0~100ms),图标在按下动画还没结束时就翻过去。
+
+## DEV-078: 多个 app 同时出声时,卡片要显示「最后被操作的那个 app」,而「被操作」有五种形态
+
+- **Pitfall:** 先在浏览器播视频、再打开 QQ音乐播歌,两个音频同时在放。媒体键实际控的是 QQ音乐(最后操作的那个),但卡片显示的却是浏览器的信息——「能控的和显示的」对不上。改成「最近**开始播**的那个」之后,方向反过来坏:浏览器→QQ 修好了,QQ→浏览器又变慢/不切。
+- **Cause:** ① 展示顺序按 `mediaRank` + `localNowPlayingPlayerPath` 的 owner 排:Chrome 占着会话槽,永远压过 QQ音乐;`media` 分支又会直接返回上报方,所以 QQ音乐一开局就输。② 元数据轮询 2s 一次,新出现的出声方要等下一个周期才被看见。③ 只用「进了出声列表」判操作是不够的:app 暂停后**未必**离开出声列表(AVAudioPlayer 的 `pause()` 实测 `IsRunningOutput` 仍是 1),而浏览器换一条视频时出声列表、owner、playbackRate **三者全都不变**——这几种「刚被操作」在出声列表上完全看不见。
+- **Prevention:**
+  ① **展示 = 出声列表里最后被操作的那个**(`pickActive` + `operatedAt` 时间戳取最大)。「被操作」由五个信号合成,缺一个就会有一个方向切不过去:`trackOperations()`
+  - 新进出声列表(开始播;暂停后进程消失的 app 走这条,QQ音乐就是);
+  - 系统会话 owner 换人(浏览器抢槽/开始播都走这条,不用等出声列表变);
+  - 上报会话 `playbackRate` 由停转播(同一个 app 自己暂停再播,owner 不变);
+  - 混音由静变响(`applyAudible` 里 `queue.async { sawSilence = true }`,队列侧消费,单候选直接判、多候选退而信 owner);
+  - 上报内容换了(曲名变 / 进度跳回 0)——槽和输出流都没动静时只有这里看得出来。
+  `media` 只在「它的 app 就是这个人」时才用(信息更全),否则用 CoreAudio 兜底。
+  ② **出声列表单独跑高频哨兵**:`activeApps()` 只是几个 CoreAudio 属性读(微秒级),而元数据(AX + CGWindowList)很贵。拆成 0.3s 的 `checkActivity()`,比的是 `bundleID 集合 + SessionSnapshot(owner/playing/title)`,任一变化就 `tick()`,切 app 从「最多 2s」变成「最多 0.3s」。`SessionSnapshot` 的 owner 要**独立于 item 取**:会话可能没有曲名(浏览器加载了页面但没播),那时 owner 照样有值,不能因为读不到 item 就把 owner 一起丢。
+  ③ **按钮不再按 owner 置灰**:既然展示的就是最后操作的那个 app,媒体键也路由给它,`control` 直接给 `.mediaKey`;置灰只会让用户点不动自己能控的东西。
+- **代价:** 「同时只控一个」做不到——`MRMediaRemoteSendCommandToApp` 这类按 app 发命令的接口需要 `com.apple.mediaremote.send-commands` 私有授权,没有授权时命令会被重定向到当前播放器(实测符号存在但无效),所以没法先把别的 app 暂停再操作目标。另一个代价见 DEV-079(多个 app 同时占着输出流时,声音归属无公开 API)。
+- **验证:** 用两个可控假播放器(`/tmp/zfmock`,AVAudioPlayer 循环播 440Hz,**不**上报 Now Playing,行为等同 QQ音乐)跑固定序列,`ZEROFLOW_NOWPLAYING_DEBUG=1` 启动看日志:① 只播 A → `audio-only app=com.example.zfmocka`;② 再播 B → 1.5s 内变 `com.example.zfmockb`(这就是用户要的「显示最后操作的那个」);③ 暂停 B 再播 B → 仍为 B。浏览器侧同理(先播浏览器视频、再播 QQ音乐,日志应出现 `audio-only app=com.tencent.QQMusicMac ... n=2`)。
+
+## DEV-079: 多个 app 同时占着输出流时,「谁在出声」没有公开 API 可归属
+
+- **Pitfall:** 两个 app 都播过、都还占着输出流(暂停但 `IsRunningOutput` 仍为 1),混音从静变响时,代码知道「有人开始播了」,但**不知道是哪个**。这时只能退而信 now playing owner(不上报的 app 又没有 owner),猜错就会出现「卡片显示 A,实际响的是 B」。
+- **Cause:** `kAudioProcessPropertyIsRunningOutput` 是布尔值,CoreAudio 的 process object 只暴露 PID / bundleID / IsRunning / IsRunningInput / IsRunningOutput,**没有**每进程电平或时间戳;系统混音(`AudioSpectrumMonitor`)拿到的是所有 app 的叠加,天然无法归属。
+- **Prevention:** 目前只在「能归属」的情况下记账(见 DEV-078 的五个信号),归属不了就不改展示,避免瞎猜导致卡片乱跳。真要彻底解决得上 **process tap**(`AudioHardwareCreateProcessTap`,macOS 14.2+)给每个候选进程单独取电平,代价是要为每个进程建 aggregate device + IOProc,属于另一个量级的改动。
+- **验证:** 用 `/tmp/zfmock` 的两个假播放器:`play a` → `play b` → `pause a` → `pause b`(此时两个都占着流、混音静)→ `play a`,卡片会停在最后操作的 B 上而不是 A。这是已知限制,不是回归。
+

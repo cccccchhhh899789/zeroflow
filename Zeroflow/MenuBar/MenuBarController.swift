@@ -108,6 +108,12 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSWindowDelegate
                 CommandTabSwitcher.runDebugProbe()
             }
         }
+        if ProcessInfo.processInfo.environment["ZEROFLOW_OPEN_SETTINGS"] == "1" {
+            ZSLog("env ZEROFLOW_OPEN_SETTINGS: defer 1.5s then open settings window")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.openSettings()
+            }
+        }
         if let clipboardDebug = ProcessInfo.processInfo.environment["ZEROFLOW_CLIPBOARD_DEBUG"], clipboardDebug != "0" {
             let expand = clipboardDebug == "preview"
             ZSLog("env ZEROFLOW_CLIPBOARD_DEBUG=\(clipboardDebug): defer 1.5s then show clipboard panel, expand=\(expand)")

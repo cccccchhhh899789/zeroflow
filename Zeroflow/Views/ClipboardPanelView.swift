@@ -12,6 +12,9 @@ enum ClipboardPanelMetrics {
     static let cornerRadius: CGFloat = 14
     static let dividerWidth: CGFloat = 1
 
+    /// 展开态总宽。内容永远按这个宽度布局，窗口从 `listWidth` 长到它只是把预览"揭开"（DEV-068）
+    static var expandedWidth: CGFloat { listWidth + dividerWidth + previewWidth }
+
     static func rows(for count: Int) -> Int {
         max(1, min(count, maxRows))
     }
@@ -97,19 +100,31 @@ struct ClipboardPanelView: View {
     @FocusState private var searchFocused: Bool
 
     var body: some View {
-        HStack(spacing: 0) {
-            if model.previewItem != nil && model.previewOnLeft {
-                previewColumn
-                dividerLine
+        // 内容永远按展开态宽度（821）排版，窗口生长只是把它"揭开"：
+        // 若让内容跟着窗口宽度重排，主线程一停顿窗口就会横向拉伸旧内容，视觉上整体闪一下（DEV-068）
+        Color.clear
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // 必须用 overlay(alignment:) 把定宽内容钉在宿主左上。
+            // 换成 `.frame(maxWidth: .infinity, alignment: .topLeading)` 是不行的：
+            // 子视图（821）比宿主（收起态 360）宽时 SwiftUI 会把它**居中**而不是靠左，
+            // 左右各裁掉 230pt，列表只剩右半截，要等窗口长到 821 才恢复正常（DEV-068）
+            .overlay(alignment: .topLeading) {
+                HStack(spacing: 0) {
+                    if model.previewOnLeft {
+                        previewColumn
+                        dividerLine
+                    }
+                    listColumn
+                    if !model.previewOnLeft {
+                        dividerLine
+                        previewColumn
+                    }
+                }
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .frame(width: ClipboardPanelMetrics.expandedWidth, alignment: .topLeading)
+                // 圆角裁剪不放在这里：内容恒定 821 宽，收起态窗口只有 360，
+                // 821 上的圆角会跑到窗口外面去，右侧就变成直角。圆角交给宿主 layer（DEV-068）
             }
-            listColumn
-            if model.previewItem != nil && !model.previewOnLeft {
-                dividerLine
-                previewColumn
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .clipShape(RoundedRectangle(cornerRadius: ClipboardPanelMetrics.cornerRadius, style: .continuous))
     }
 
     private var dividerLine: some View {
@@ -286,14 +301,20 @@ struct ClipboardPanelView: View {
 
     // MARK: - 预览
 
+    /// 预览列：宽度恒定占位（未展开时是透明空位），只让内容出现/消失。
+    /// 占位恒定 = HStack 总宽不变 = 窗口生长期间 SwiftUI 不重排（DEV-068）
     private var previewColumn: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        Group {
             if let item = model.previewItem {
-                previewHeader(for: item)
-                Rectangle()
-                    .fill(Color.primary.opacity(0.1))
-                    .frame(height: 1)
-                previewBody(for: item)
+                VStack(alignment: .leading, spacing: 0) {
+                    previewHeader(for: item)
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.1))
+                        .frame(height: 1)
+                    previewBody(for: item)
+                }
+            } else {
+                Color.clear
             }
         }
         .frame(width: ClipboardPanelMetrics.previewWidth)

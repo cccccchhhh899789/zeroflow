@@ -263,6 +263,14 @@ final class ClipboardHistoryStore: ObservableObject {
         trimToLimit(persist: true)
     }
 
+    /// 删除单条记录（连同图片原图与派生图、解码缓存）
+    func remove(id: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        let item = items.remove(at: index)
+        removeImageFile(for: item)
+        persist()
+    }
+
     func clear() {
         loadGeneration += 1
         isLoaded = true

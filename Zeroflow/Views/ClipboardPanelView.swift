@@ -73,7 +73,7 @@ final class ClipboardViewModel: ObservableObject {
         return list[selectedIndex]
     }
 
-    func rowTitle(for item: ClipboardItem) -> String {
+    static func rowTitle(for item: ClipboardItem) -> String {
         switch item.kind {
         case .text:
             return item.singleLineText
@@ -96,8 +96,12 @@ struct ClipboardPanelView: View {
     @ObservedObject var model: ClipboardViewModel
     var onSelect: (Int) -> Void
     var onHover: (Int) -> Void
+    var onDelete: (ClipboardItem) -> Void
+    var onClear: () -> Void
 
     @FocusState private var searchFocused: Bool
+    /// 「清空」二次确认态：点一次进入确认，再点一次才真清；3 秒无操作自动复位
+    @State private var confirmingClear = false
 
     var body: some View {
         // 内容永远按展开态宽度（821）排版，窗口生长只是把它"揭开"：
@@ -190,8 +194,14 @@ struct ClipboardPanelView: View {
                 // 每行的缩略图都跟着跑一遍（历史里图片一多就是成百次解码）
                 LazyVStack(spacing: 2) {
                     ForEach(Array(model.filteredItems.enumerated()), id: \.element.id) { index, item in
-                        row(item: item, index: index)
-                            .id(item.id)
+                        ClipboardRow(
+                            item: item,
+                            selected: index == model.selectedIndex,
+                            onSelect: { onSelect(index) },
+                            onHover: { onHover(index) },
+                            onDelete: { onDelete(item) }
+                        )
+                        .id(item.id)
                     }
                 }
                 .padding(.horizontal, 6)
@@ -207,57 +217,6 @@ struct ClipboardPanelView: View {
                     // 不传 anchor = 最小滚动：选中项已可见时不动，越出可视区才滚
                     proxy.scrollTo(list[index].id)
                 }
-            }
-        }
-    }
-
-    private func row(item: ClipboardItem, index: Int) -> some View {
-        let selected = index == model.selectedIndex
-        return HStack(spacing: 10) {
-            thumbnail(for: item)
-                .frame(width: 22, height: 22)
-                .clipped()
-            Text(model.rowTitle(for: item))
-                .font(.system(size: 12.5))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(ClipboardViewModel.timeString(for: item.createdAt))
-                .font(.system(size: 10.5))
-                .monospacedDigit()
-                .foregroundColor(.secondary)
-        }
-        .padding(.horizontal, 8)
-        .frame(height: ClipboardPanelMetrics.rowHeight - 2)
-        .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(selected ? Color(nsColor: .selectedContentBackgroundColor) : Color.clear)
-        )
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            if hovering { onHover(index) }
-        }
-        .onTapGesture { onSelect(index) }
-    }
-
-    @ViewBuilder private func thumbnail(for item: ClipboardItem) -> some View {
-        switch item.kind {
-        case .text:
-            Image(systemName: "text.alignleft")
-                .font(.system(size: 13))
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        case .image:
-            if let image = ClipboardHistoryStore.shared.thumbnail(for: item) {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-            } else {
-                Image(systemName: "photo")
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
@@ -278,9 +237,11 @@ struct ClipboardPanelView: View {
     private var footer: some View {
         HStack(spacing: 6) {
             if AccessibilityPermission.isGranted {
-                Text(L10n.tr("↑↓ 选择 · ↵ 粘贴 · esc 关闭"))
+                Text(L10n.tr("↑↓ 选择 · ↵ 粘贴 · ⌫ 删除 · esc 关闭"))
                     .font(.system(size: 10.5))
                     .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
             } else {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 10))
@@ -288,15 +249,45 @@ struct ClipboardPanelView: View {
                 Text(L10n.tr("未授予辅助功能权限：选中仅复制到剪贴板"))
                     .font(.system(size: 10.5))
                     .foregroundColor(.secondary)
+                    .lineLimit(1)
             }
             Spacer(minLength: 8)
             Text("\(model.filteredItems.count)")
                 .font(.system(size: 10.5))
                 .monospacedDigit()
                 .foregroundColor(.secondary)
+            if !model.items.isEmpty {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.15))
+                    .frame(width: 1, height: 10)
+                clearButton
+            }
         }
         .padding(.horizontal, 12)
         .frame(height: ClipboardPanelMetrics.footerHeight)
+    }
+
+    /// 清空全部：二次确认（点一次变「确认清空」，再点才执行），3 秒无操作自动复位。
+    /// 面板是非激活窗口，弹不了系统 alert，就地二次确认是最轻的做法
+    private var clearButton: some View {
+        Button {
+            if confirmingClear {
+                confirmingClear = false
+                onClear()
+            } else {
+                confirmingClear = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    confirmingClear = false
+                }
+            }
+        } label: {
+            Text(confirmingClear ? L10n.tr("确认清空") : L10n.tr("清空"))
+                .font(.system(size: 10.5, weight: confirmingClear ? .semibold : .regular))
+                .foregroundColor(confirmingClear ? .red : .secondary)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .help(L10n.tr("删除全部剪贴板记录"))
     }
 
     // MARK: - 预览
@@ -372,6 +363,87 @@ struct ClipboardPanelView: View {
             } else {
                 Text(L10n.tr("图片已不可用"))
                     .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+}
+
+/// 单行记录：hover 时右侧淡入删除按钮。
+/// 按钮宽度恒定占位（只是 opacity 切换），否则鼠标划过时整行文字会被重新分配宽度而抖动。
+private struct ClipboardRow: View {
+    let item: ClipboardItem
+    let selected: Bool
+    var onSelect: () -> Void
+    var onHover: () -> Void
+    var onDelete: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            thumbnail
+                .frame(width: 22, height: 22)
+                .clipped()
+            Text(ClipboardViewModel.rowTitle(for: item))
+                .font(.system(size: 12.5))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(ClipboardViewModel.timeString(for: item.createdAt))
+                .font(.system(size: 10.5))
+                .monospacedDigit()
+                .foregroundColor(.secondary)
+            deleteButton
+        }
+        .padding(.horizontal, 8)
+        .frame(height: ClipboardPanelMetrics.rowHeight - 2)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(selected ? Color(nsColor: .selectedContentBackgroundColor) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onHover { inside in
+            hovering = inside
+            if inside { onHover() }
+        }
+        .onTapGesture { onSelect() }
+    }
+
+    /// 必须是独立 Button：整行有 onTapGesture，若用 Image + onTapGesture 会被父级手势吞掉，
+    /// 点删除会连带触发「粘贴并关闭面板」
+    private var deleteButton: some View {
+        Button(action: onDelete) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 11))
+                // hover 必然等于选中（悬停会同步 selectedIndex），所以图标实际总是落在强调色底上，
+                // 用 .primary 而不是 .secondary 才够对比度
+                .foregroundColor(selected ? Color.primary.opacity(0.85) : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 18, height: 18)
+        .opacity(hovering ? 1 : 0)
+        .allowsHitTesting(hovering)
+        .help(L10n.tr("删除这条记录"))
+    }
+
+    @ViewBuilder private var thumbnail: some View {
+        switch item.kind {
+        case .text:
+            Image(systemName: "text.alignleft")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .image:
+            if let image = ClipboardHistoryStore.shared.thumbnail(for: item) {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 13))
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

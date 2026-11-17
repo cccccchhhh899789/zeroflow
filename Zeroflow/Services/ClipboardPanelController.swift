@@ -195,14 +195,22 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
                 guard let self, self.model === model else { return }
                 let wasEmpty = model.items.isEmpty
                 guard wasEmpty || model.items.map(\.id) != items.map(\.id) else { return }
+                let oldRowCount = ClipboardPanelMetrics.rows(for: model.filteredItems.count)
                 model.items = items
                 model.selectedIndex = min(model.selectedIndex, max(0, model.filteredItems.count - 1))
                 if let preview = model.previewItem, !items.contains(where: { $0.id == preview.id }) {
                     model.previewItem = nil
                 }
-                if wasEmpty { self.applyFrame(animated: false) }
-                // 历史是后台加载的：弹出时还没有条目就补一次首条预览计时
-                if model.previewItem == nil, model.query.isEmpty { self.schedulePreview() }
+                // 行数变了（删除/清空/后台加载完成）必须重新落 frame，
+                // 否则面板会留着被删掉那条的高度，底部空出一截
+                let newRowCount = ClipboardPanelMetrics.rows(for: model.filteredItems.count)
+                if wasEmpty || newRowCount != oldRowCount {
+                    // 后台加载完成没有用户动作，无动画落位；删除/清空走收缩动画
+                    self.applyFrame(animated: !wasEmpty)
+                }
+                // 只给「弹出时历史还没加载完」补一次首条预览计时。
+                // 删除后不主动展开新条目：否则收缩动画会立刻被重展开打断，看着像抽搐
+                if wasEmpty, model.previewItem == nil, model.query.isEmpty { self.schedulePreview() }
             }
             .store(in: &cancellables)
     }
@@ -239,6 +247,32 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         guard let model else { return }
         model.selectedIndex = index
         pasteSelected()
+    }
+
+    // MARK: - 删除
+
+    /// 删除单条：Store 落盘 + 清图片文件，面板高度由 `$items` 订阅统一 refit
+    private func delete(_ item: ClipboardItem) {
+        guard let model, model.items.contains(where: { $0.id == item.id }) else { return }
+        pendingPreview?.cancel()
+        pendingPreview = nil
+        // 先收掉预览再删：被删项正在预览时，留一帧旧内容会闪
+        if model.previewItem?.id == item.id { model.previewItem = nil }
+        ClipboardHistoryStore.shared.remove(id: item.id)
+        ZSLog("clipboard: deleted item, remaining=\(ClipboardHistoryStore.shared.items.count)")
+    }
+
+    private func deleteSelected() {
+        guard let model, let item = model.selectedItem else { return }
+        delete(item)
+    }
+
+    private func clearAll() {
+        pendingPreview?.cancel()
+        pendingPreview = nil
+        model?.previewItem = nil
+        ClipboardHistoryStore.shared.clear()
+        ZSLog("clipboard: cleared all")
     }
 
     private func moveSelection(by step: Int) {
@@ -336,6 +370,14 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
                 return nil
             case 36, 76: // return / enter
                 self.pasteSelected()
+                return nil
+            case 51, 117: // delete / forward delete
+                // 搜索框有内容时 Delete 该删字符，交还给 TextField；
+                // 此时要删记录用 ⌘⌫（带 command 一律当删除记录处理）
+                let deleteItem = event.modifierFlags.contains(.command)
+                    || (self.model?.query.isEmpty ?? true)
+                guard deleteItem else { return event }
+                self.deleteSelected()
                 return nil
             default:
                 return event
@@ -500,7 +542,9 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         let root = ClipboardPanelView(
             model: model,
             onSelect: { [weak self] index in self?.select(index) },
-            onHover: { [weak self] index in self?.hover(index) }
+            onHover: { [weak self] index in self?.hover(index) },
+            onDelete: { [weak self] item in self?.delete(item) },
+            onClear: { [weak self] in self?.clearAll() }
         )
         let size = collapsedSize(rowCount: model.filteredItems.count)
         let container = NSView(frame: NSRect(origin: .zero, size: size))

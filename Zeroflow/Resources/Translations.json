@@ -819,10 +819,25 @@
     "en": "Search clipboard history",
     "ja": "クリップボード履歴を検索"
   },
-  "↑↓ 选择 · ↵ 粘贴 · esc 关闭": {
-    "zh-Hans": "↑↓ 选择 · ↵ 粘贴 · esc 关闭",
-    "en": "↑↓ select · ↵ paste · esc close",
-    "ja": "↑↓ 選択 · ↵ 貼り付け · esc 閉じる"
+  "↑↓ 选择 · ↵ 粘贴 · ⌫ 删除 · esc 关闭": {
+    "zh-Hans": "↑↓ 选择 · ↵ 粘贴 · ⌫ 删除 · esc 关闭",
+    "en": "↑↓ select · ↵ paste · ⌫ delete · esc close",
+    "ja": "↑↓ 選択 · ↵ 貼り付け · ⌫ 削除 · esc 閉じる"
+  },
+  "删除这条记录": {
+    "zh-Hans": "删除这条记录",
+    "en": "Delete this entry",
+    "ja": "この記録を削除"
+  },
+  "删除全部剪贴板记录": {
+    "zh-Hans": "删除全部剪贴板记录",
+    "en": "Delete all clipboard entries",
+    "ja": "クリップボードの記録をすべて削除"
+  },
+  "确认清空": {
+    "zh-Hans": "确认清空",
+    "en": "Confirm",
+    "ja": "消去する"
   },
   "未授予辅助功能权限：选中仅复制到剪贴板": {
     "zh-Hans": "未授予辅助功能权限：选中仅复制到剪贴板",

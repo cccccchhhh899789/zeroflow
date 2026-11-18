@@ -360,8 +360,8 @@ final class CommandTabSwitcher {
         }
     }
 
-    /// 主线程：构建瓦片，抓完缩略图再弹面板（避免先图标后缩略图的闪烁）。
-    /// 250ms 兜底：抓图过慢时也照常弹（未就绪的瓦片显示 app 图标，见 FR-18.6）。
+    /// 主线程：构建瓦片，先用缓存旧图预填；全部命中就立即上屏，否则抓完再弹（250ms 兜底）。
+    /// 未就绪的瓦片显示 app 图标（见 FR-18.6）。
     private func presentSession(windows: [SwitcherWindow], generation: Int) {
         guard isSessionLive(generation) else { return }
         guard !windows.isEmpty else {
@@ -371,8 +371,17 @@ final class CommandTabSwitcher {
         }
 
         let model = ensureModel()
-        model.tiles = windows
+        // 预填：缓存里有图就先挂上，面板不必等抓取——冷启动才会落到 app 图标
+        model.tiles = windows.map { window in
+            guard !window.isWindowlessApp,
+                  let cached = WindowThumbnailer.shared.cachedThumbnail(for: window.id) else { return window }
+            var updated = window
+            updated.thumbnail = cached
+            return updated
+        }
         let count = windows.count
+        let prefilled = model.tiles.filter { !$0.isWindowlessApp && $0.thumbnail != nil }.count
+        debugLog("SWITCHER present windows=\(count) cachedPrefill=\(prefilled)")
         lock.lock()
         selectionIndex = Self.wrappedIndex(selectionIndex, count: count)
         let index = selectionIndex
@@ -387,6 +396,11 @@ final class CommandTabSwitcher {
             panel.centerOnMouseScreen()
             panel.orderFront(nil)
             self.assertPanelVisible(panel, generation: generation)
+        }
+
+        // 全部命中缓存：零等待上屏（后台抓取照常跑，命中时几乎无开销）
+        if model.tiles.allSatisfy({ $0.isWindowlessApp || $0.thumbnail != nil }) {
+            present()
         }
 
         WindowThumbnailer.shared.fetchThumbnails(for: windows.filter { !$0.isWindowlessApp }) { [weak self] images in
@@ -534,11 +548,16 @@ final class CommandTabSwitcher {
         }
     }
 
-    /// 主线程：收起面板并清空内容状态
+    /// 主线程：收起面板并清空内容状态；顺带给没抓到图的瓦片补抓一次（下次会话直接命中）
     private func dismissSession() {
         panel?.orderOut(nil)
+        let missing = (model?.tiles ?? []).filter { !$0.isWindowlessApp && $0.thumbnail == nil }
         model?.tiles = []
         model?.selectedIndex = 0
+        guard !missing.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            WindowThumbnailer.shared.prewarm(for: missing)
+        }
     }
 
     private func applyThumbnails(_ images: [CGWindowID: NSImage]) {

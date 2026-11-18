@@ -559,3 +559,11 @@
 - **Prevention:** ① **删掉 owner 换人这个信号**。浏览器真的开始播时,出声列表(信号 1)或 `playbackRate` 由停转播(信号 2)一定会动,不需要 owner;owner 只在首次挑人(`current == nil`)和排序 tiebreak 里用。② **删掉 `needsFreshPick`**,重开面板不重挑展示对象;关着期间真有人开播,靠 `previousActives` 还是旧集合就能认出(信号 1 会正常记账)。③ 顺带收紧信号 4(会话内容变了):只认「正在播 + 曲名变了」,不再认「进度跳回 0」——会话重新注册时进度也会跳回 0,切个窗口就够触发;暂停中的会话改标题同样不算开始播。④ `checkActivity` 的进/出列表证据在「前一帧为空」(面板刚打开)时不算数,否则整张表都会被当成「刚进入」。
 - **代价:** 浏览器在「占着输出流、不上报、也不进/出列表」的状态下换视频,可能不被认成一次新操作(要等它重新进列表或 rate 翻转)。
 - **验证:** 浏览器播视频 → QQ音乐播歌(卡片=QQ)→ 卡片里暂停 QQ → 反复把浏览器窗口切到前台/切回 QQ → 卡片必须一直停在 QQ(已暂停),日志里不应出现 `current ... → com.google.Chrome（新开播）`。
+
+## DEV-088: ⌘⇥ 缩略图「每次都在重新加载」——缓存三处配置合起来等于没缓存
+
+- **Pitfall:** 按 ⌘⇥ 弹出的切换器里,缩略图经常先空一拍再「刷」出来,感觉每次都重新抓图。
+- **Cause:** 三个独立配置叠加,让缓存命中率接近零:① `WindowThumbnailer.cacheTTL = 10`,两次 ⌘⇥ 间隔超过 10s 就整批过期(正常切窗口间隔远大于 10s);② `cacheCostLimit = 8MB`,而一张 168pt@2x 缩略图 ≈ 336×210×4 ≈ 282KB,只装得下 **约 28 张**,窗口一多 NSCache 就在会话内淘汰旧图,`countLimit = 40` 根本没机会生效;③ `CommandTabSwitcher.presentSession` **不读缓存**——`cachedThumbnail(for:)` 只有 Dock 预览在用,切换器要么等 `fetchThumbnails` 整批抓完,要么 250ms 兜底先弹,冷缓存时就是「先 app 图标、再一张张补缩略图」。
+- **Prevention:** ① TTL 10s → 60s(切换器要的是「一眼认出是哪个窗口」,几十秒内容陈旧比每次重抓伤得轻);② costLimit 8MB → 32MB(≈110 张)、countLimit 40 → 80,内存代价有界;③ `presentSession` 先用 `cachedThumbnail` 预填 tiles,`allSatisfy(有图)` 时**零等待上屏**,后台抓取只做替换;④ `dismissSession` 对仍缺图的瓦片延迟 1.5s 调 `prewarm` 补抓(绕过抓取节流)。
+- **代价:** 缓存里的图可能陈旧最多 60s;因此缓存条目必须记 `bounds`,宽高比变化超 8% 视为过期(否则 resize/全屏后旧图被拉伸,TTL 越长越明显)。定时轮询预热不做——空闲抓图是无谓开销,TTL 内缓存本身就是热的。
+- **验证:** `ZEROFLOW_SWITCHER_DEBUG=1` 启动,连按两次 ⌘⇥,`/tmp/zeroflow.log` 里第二次应出现 `SWITCHER present windows=N cachedPrefill=N`(N 相等 = 全命中),面板当帧就有缩略图。

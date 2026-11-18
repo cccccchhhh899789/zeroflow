@@ -1054,6 +1054,8 @@ struct NotchContentView: View {
     }
 
     /// 真实音频频谱：16 段对数频带，跟着系统混音律动；暂停或没抓到音频时压成一条基线。
+    /// 暂停时必须把柱子也压平：只降透明度的话柱子还在跟着别人的声音跳，
+    /// 和「播放/暂停图标」自相矛盾（用户就是靠律动判断图标的，见 DEV-085）。
     /// 数据来自 `AudioSpectrumMonitor`（ScreenCaptureKit 音频捕获 → vDSP FFT），
     /// 只在这个卡片宿主里被观察，所以 30fps 的重绘不会波及日历/资源卡（见 DEV-050）。
     private func spectrumStrip(_ info: NowPlayingInfo) -> some View {
@@ -1061,7 +1063,7 @@ struct NotchContentView: View {
         let live = info.isPlaying && AudioSpectrumMonitor.shared.isCapturing
         return HStack(alignment: .bottom, spacing: 0) {
             ForEach(0..<AudioSpectrumMonitor.bandCount, id: \.self) { index in
-                let level = index < levels.count ? levels[index] : 0
+                let level = live && index < levels.count ? levels[index] : 0
                 // 最矮 2pt：静音时也留一条基线，卡片不会突然空一块
                 let barHeight = 2 + level * (Self.spectrumStripHeight - 2)
                 Capsule()

@@ -136,10 +136,11 @@ SwiftUI 视图 + AppKit/CG/AX(含私有 API dlsym 桥)服务层 + UserDefaults/A
 | `SystemResourceMonitor.swift` | 灵动岛系统资源采样:CPU/CPU 温度/内存/网络/磁盘/GPU,仅面板可见期间 2s 轮询(弹出后 0.4s 快速补采首个速率值),各源免 root(IOKit 注册表 + mach + sysctl + IOHID 私有 API) |
 | `CPUTemperatureReader.swift` | CPU 温度:IOHIDEventSystemClient(私有 API dlsym)匹配 AppleSMC,取 `PMU tdie*` 传感器最高值;客户端与传感器列表常驻复用,失效自愈重建 |
 | `CacheCleaner.swift` | 「一键清理」:后台清 `~/Library/Caches`、`~/Library/Containers/*/Data/Library/Caches`、`~/Library/Logs` 的直接子项(不删根目录、跳过符号链接与 10 分钟内改动过的项),回主线程清缩略图/图标缓存,返回释放体积供资源卡按钮显示 |
-| `NowPlayingMonitor.swift` | 灵动岛正在播放:双源合并(系统 Now Playing 的 MRNowPlayingRequest 类属性轮询,降级 osascript JXA 子进程;CoreAudio 出声进程兜底),MRMediaRemoteSendCommand 播放控制 |
+| `NowPlayingMonitor.swift` | 灵动岛正在播放:双源合并(系统 Now Playing 的 MRNowPlayingRequest 类属性轮询,降级 osascript JXA 子进程;CoreAudio 出声进程兜底),MRMediaRemoteSendCommand 播放控制;展示对象是**粘性当前播放器**(只有新开播/退出才换人,暂停不换,DEV-084),播放态由 `deriveIsPlaying` 单点判定(律动+出声列表优先),点播放/暂停先翻图标再开 1.6s 待确认窗口验证(DEV-085) |
 | `AudioActivityMonitor.swift` | 灵动岛正在播放的兜底源:CoreAudio process object list 枚举正在出声的 app(helper 归并到宿主 app、按 bundleID 去重、owner 优先排序,过滤守护进程/自身),`sameApp` 做 bundle 家族比对,`WindowTitleReader` 用 CGWindowList 读窗口标题当曲名 |
 | `MediaKey.swift` | 灵动岛正在播放的控制兜底:系统媒体键注入(NX_KEYTYPE_PLAY/NEXT/PREVIOUS),只对当前 now playing owner 生效;`AXMediaInfoReader` 从 AX 播放控制栏读曲名/歌手 |
 | `AudioSpectrumMonitor.swift` | 灵动岛正在播放的律动频谱:ScreenCaptureKit 音频轨捕获(只开音频、视频压到 16×16@1fps)→ vDSP FFT → 16 段对数频带 + 自适应 dB 归一化,`setActive` 随音乐模块启停;同时发布 `isAudible`(系统混音有没有声音,0.35s 保持),是播放/暂停态的唯一真相 |
+| `AppAudioProbe.swift` | 「当前播放器到底有没有在出声」:ScreenCaptureKit 按 app 过滤(`SCContentFilter(display:including:)`)单开一条只带音频的 16×16@1fps 捕获流,峰值阈值判有声(0.3s 保持),复用截图权限;`IsRunningOutput` 暂停后不归零、系统混音无法归属,只能单独听它(DEV-086);**没收到过音频 buffer 前绝不说静音**,避免把捕获失败当成暂停 |
 | `PhantomWindowDetector.swift` | 幽灵窗口判定(对齐 AltTab cgsVerdict + AX subrole 兜底) |
 | `ScreenCapture.swift` | ScreenCaptureKit 截屏,按 displayID 缓存 `SCContentFilter` |
 | `WindowActivator.swift` | 跨 app 窗口激活:还原最小化 → SLP 置前 → makeKey → AX main/raise(探针验证) |

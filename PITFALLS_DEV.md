@@ -522,3 +522,40 @@
   ② **event tap 线程解 AX 打自家窗口 = 永久死锁**:`DockClickMinimizer.appFromHitTest` 在 CGEventTap 线程上 `AXUIElementCopyElementAtPosition`。命中点落在自家 SwiftUI 窗口时,HIServices 走**进程内本地实现**(不跨进程),一路进 AppKit `accessibilityHitTest:` → SwiftUI `ViewGraphRootValueUpdater.updateGraph` → `_MovableLockSyncMain` 等主线程;此时它持着 HIServices 全局 AX 锁,而主线程正在 `AXObserverAddNotification` 里等同一把锁(`_os_nospin_lock_lock_slow` → `__ulock_wait`)。ABBA 死锁,栈里同时能看到两个 ⌘⇥ 线程在 `WindowList.enumerate → AXWindow.focusedWindowID` 排这把锁。
 - **Prevention:** ① `rebuildObservers`/`addObserver` 全部丢到 `axQueue`(串行后台队列),主线程只留 `CFRunLoopAddSource(CFRunLoopGetMain(), ...)`;`registerObserver` 前用 `isAXClientCandidate` 过滤(排除 `com.apple.WebKit*`、`.xpc/` 路径、无 bundleURL、`.prohibited`);注册失败的 pid 记进 `failedPids` 不再重试(pid 退出/复用即清);`AXUIElementSetMessagingTimeout(element, 0.3)` 给单次调用封顶。② `DockClickMinimizer.appFromDockItem` 先判命中点是否落在自家窗口里(`isOwnWindowPoint`,用 `CGWindowListCopyWindowInfo` 而不是 `NSApp.windows`——事件线程碰 AppKit 窗口数组不安全),是就直接放行不解 AX;`appFromHitTest` 同样设 0.3s 超时。
 - **验证:** `ZEROFLOW_OPEN_SETTINGS=1` 启动后 `sample` 主线程应停在 `_DPSNextEvent`(空闲),日志里失败注册只出现一次、每个 ≤0.3s、且看不到 WebKit 子进程的 pid。修复前同场景主线程停在 `rebuildObservers → _AXObserverAddNotification`。
+
+## DEV-084: 卡片显示对象必须「粘住」当前播放器,暂停不能换人
+
+- **Pitfall:** 两个声源同时在放(A 早开、B 后开,卡片显示 B)。点暂停把 B 停掉后,卡片切到还在响的 A;再点暂停,本该停掉 A,实际却是 **B 被重新拉起来**,两个声源一起在播。
+- **Cause:** ① B 暂停后离开 CoreAudio 出声列表,`trackOperations` 里 `operatedAt = operatedAt.filter { live.contains($0.key) }` 把 B 的「刚被操作」记录删掉,`pickActive` 于是退到还在响的 A;② 但媒体键(`NX_KEYTYPE_PLAY`)由 MediaRemote 分发给**最后开播的那个 app**,也就是 B,无法定向(DEV-081)。于是「卡片上是 A、按下去动的是 B」;③ B 被媒体键拉起后重新进出声列表,`operatedAt[B] = now`,卡片又跳回 B——三步串成「两个都在播」。
+- **Prevention:** 把「展示对象」从「出声列表里 operatedAt 最大的那个」改成**粘性状态** `current`(`updateCurrent`):只有「某个 app 的 operatedAt 比 `current.at` 更晚」或「它退出了」才换人,暂停、离开出声列表一律不换。卡片停在暂停态的那个 app 上,按钮点的就是它,系统路由的也是它。`pickActive`/`idleInfo`/`lastAudioApp` 因此整体删除——`audioOnlyInfo` 直接按 `current` 出卡,app 重启(pid 变了)时按 bundleID 重新认 pid。面板关着时不轮询,`operatedAt` 收不到信号——重开时靠 `previousActives` 仍是旧集合这一点认出「关着期间有人开播」(信号 1),**不要**在重开时按「谁在响」重挑(那会让「暂停当前播放器、切个窗口」直接跳卡,见 DEV-087)。
+- **代价:** 当前播放器暂停、别的 app 还在响时,卡片显示的是「已暂停」而不是那个在响的 app(用户要的就是这个:状态只存最新那个播放器)。想暂停另一个 app 只能去它自己的界面。
+- **验证:** 两个可控假播放器:`play a` → `play b` → 点卡片暂停 → 卡片仍显示 B(已暂停)、A 继续响 → 再点播放 → 只把 B 拉起来,不会出现「两个都在播」。日志里 `NowPlaying: current=...` 只在「新开播」时变。
+
+## DEV-085: 播放/暂停图标要「点击即翻 + 律动验证」,不能只信 playbackRate
+
+- **Pitfall:** 卡片中间的播放/暂停图标时不时显示反的:点了暂停图标不动、或点了播放又自己变回播放键;律动柱子还在跳,图标却显示「播放」。
+- **Cause:** ① 上报型 app(`control == .mediaRemote`)的 `isPlaying` 只认 2s 一次子进程读到的 `playbackRate`,`applyAudible`/`publish` 里都有 `control != .mediaRemote` 的短路——电平再快也不参与判定,字段缺失时还默认「在播」;② 不上报的 app 的 `isPlaying` 直接等于全局混音 `audible`,别的 app 在响时它明明是暂停也显示「在播」;③ 频谱柱子在 `!isPlaying` 时只把透明度降到 30%,柱子照样跟着全局混音跳,和图标自相矛盾。
+- **Prevention:** ① 播放态收敛到 `deriveIsPlaying` 一处:有声音且当前 app 还在出声列表里 = 在播,没声音 = 暂停;唯一例外是「上报型 app 仍在输出流里且自称在播」——那是系统音量 0/输出静音,不能判暂停(DEV-075 的已知代价);没在捕获或出声列表还没认出来时退回上报值。② `send(.togglePlay)` 先 `beginPendingToggle` 立刻翻图标,开一个 1.6s 的待确认窗口:窗口内 `applyAudible`/`publish` 不许覆盖,一旦真实信号与意图一致就提前收窗,超时还没对上才认命改回真实值;发不出去(符号缺失 / `.none`)时不翻。③ 发送后补查改成 0.2/0.6/1.2s 三次(`inFlight` 挡重叠),不再只查一次 0.5s。④ `spectrumStrip` 在 `!isPlaying` 时把 16 段压成基线,律动与图标永远一致。
+- **代价:** 系统音量 0 时「在播」只能靠上报值维持,不上报的 app 会被判成暂停;暂停后仍占着输出流的 app(浏览器)在 `audible` 为 true 时仍可能被当成在播(DEV-079 无解)。
+- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`,点暂停 → 图标当帧变播放键、日志出现 `待确认 <bid> → 暂停`,随后要么 `current` 侧电平翻转提前收窗,要么 1.6s 后 `待确认超时 → 真实值 false`;律动柱子在暂停瞬间压平。
+
+## DEV-086: 「这个 app 停了没有」判不准——只能按 app 单独抓音频
+
+- **Pitfall:** 多个声源同时响时,把最新那个声源暂停,卡片图标和律动都不停(还在跳);律动看起来跟图标矛盾。上一版(DEV-084/085)用「混音有声 + 它在出声列表里 = 在播」推,一样停不下来。
+- **Cause:** 三条判据全都不可靠:① `kAudioProcessPropertyIsRunningOutput` 是布尔值,暂停后**不一定归零**(浏览器/AVAudioPlayer 暂停仍占着输出流,DEV-075);② 系统混音是所有 app 的叠加,别的声源还在响时「有声」永远为真,无法归属到具体 app(DEV-079);③ `playbackRate` 只有上报型 app 有,而且 2s 才更新一次。三者叠起来,「卡片上这个 app 停了没有」在公开 API 里根本判不出来。
+- **Prevention:**
+  ① 新增 `AppAudioProbe`:用 `SCContentFilter(display:including:[app], exceptingWindows:[])` + `capturesAudio` 给**当前播放器**单独开一条捕获流(16×16@1fps、只算峰值不跑 FFT),按「有没有能量」判它在不在出声,0.3s 保持。复用截图已有的屏幕录制权限,不额外弹授权。
+  ② **没收到过音频 buffer 之前绝不说「静音」**:分不清「它本来就静着」和「按 app 捕获对它不生效」,说错会把正在播的卡片判成暂停。只有先听见它出声,之后的静音才可信;否则 `isSounding = nil`,调用方退回旧规则。
+  ③ 探针只在面板可见时对当前播放器生效(切人时先停旧流再建新流,`generation` 丢弃过期启动结果),收起面板即 `setTarget(nil)`,不留空转捕获流。
+  ④ 探针拿不到电平时用**锁存**(`audioOnlyLatch`)兜底:只认正向证据(离开出声列表=停、重新进入=播、混音由静变响且单一候选=播、点击意图),不再用「混音有声 + 在列表里」每次重推——那条正是「点了暂停又自己变回在播」的来源。待确认窗口内与意图相反的证据先不覆盖图标,窗口结束才认。
+  ⑤ 上报型 app(`.mediaRemote`)直接信 `playbackRate`,不再被「在不在出声列表里」盖掉。
+- **代价:** 多一条捕获流(≈ 一个 16×16@1fps 音频会话);按 app 捕获对个别 app 可能不生效(靠 `nil` 退回锁存);系统音量 0 时探针听不到声音,卡片会显示暂停(与律动一致,取舍见 DEV-085)。
+- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`,日志里应看到 `AppAudio: 探测 pid=... bundle=...`,暂停时 `NowPlaying: 探针 静音 → <bid>`(0.3s 内),律动同时压平;两个声源同时响时只有被暂停的那个卡片停,另一个不受影响。若看不到 `AppAudio: 探测`,说明该 app 拿不到捕获对象,走锁存兜底。
+
+## DEV-087: 「会话 owner 换人」不是「有人开始播」——切窗口会让卡片乱跳
+
+- **Pitfall:** 浏览器先播、QQ音乐后播(卡片显示 QQ)。暂停 QQ 后卡片正确停在 QQ(已暂停),但只要**把窗口切到浏览器**(不点任何按钮),卡片就跳到浏览器,而按钮实际还在控 QQ——显示和控制又对不上了。
+- **Cause:** 两条「不是操作却记账」的路径。① `trackOperations` 把「now playing 会话 owner 换人」当成一次操作(`operatedAt[bid] = now`):owner 只表示谁占着会话槽,把浏览器点到前台会让它重新注册会话、抢走槽位,于是浏览器拿到一个新时间戳,`updateCurrent` 里 `bestAt > cur.at` 成立就换人。② 上一版为「面板关着时用户可能在别处换着播」加了 `needsFreshPick`:重开面板时按「谁真的在响」重挑一次。但面板是悬停 HUD,频繁开关,而「当前播放器已暂停、另一个还在响」正是最典型的暂停后状态——每次重开都会把卡片抢到那个还在响的 app 上。
+- **Prevention:** ① **删掉 owner 换人这个信号**。浏览器真的开始播时,出声列表(信号 1)或 `playbackRate` 由停转播(信号 2)一定会动,不需要 owner;owner 只在首次挑人(`current == nil`)和排序 tiebreak 里用。② **删掉 `needsFreshPick`**,重开面板不重挑展示对象;关着期间真有人开播,靠 `previousActives` 还是旧集合就能认出(信号 1 会正常记账)。③ 顺带收紧信号 4(会话内容变了):只认「正在播 + 曲名变了」,不再认「进度跳回 0」——会话重新注册时进度也会跳回 0,切个窗口就够触发;暂停中的会话改标题同样不算开始播。④ `checkActivity` 的进/出列表证据在「前一帧为空」(面板刚打开)时不算数,否则整张表都会被当成「刚进入」。
+- **代价:** 浏览器在「占着输出流、不上报、也不进/出列表」的状态下换视频,可能不被认成一次新操作(要等它重新进列表或 rate 翻转)。
+- **验证:** 浏览器播视频 → QQ音乐播歌(卡片=QQ)→ 卡片里暂停 QQ → 反复把浏览器窗口切到前台/切回 QQ → 卡片必须一直停在 QQ(已暂停),日志里不应出现 `current ... → com.google.Chrome（新开播）`。

@@ -43,6 +43,7 @@ macOS 原生的轻量效率工具集：截图标注、窗口切换、Dock 增强
 
 ```bash
 xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow \
+  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
   -configuration Release -derivedDataPath build -allowProvisioningUpdates build
 open build/Build/Products/Debug/Zeroflow.app
 ```

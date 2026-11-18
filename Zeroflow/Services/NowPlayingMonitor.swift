@@ -47,6 +47,9 @@ enum ControlChannel {
 /// 媒体键无法定向（DEV-081），卡片一旦切到别的 app 上按钮就控不到它了。
 /// 播放态由 `deriveIsPlaying` 一处判定，点击后先翻转图标再验证（`beginPendingToggle`）。
 ///
+/// **只认白名单**（`allowedBundles`）：两个来源都在入口过滤，别的 app 在出声/上报都不出卡。
+/// 过滤点必须三处齐全——出声哨兵、`actives`、`media`——漏一处就会有路径把非白名单 app 顶上来。
+///
 /// 合并规则见 `read()`。播放控制走 `MRMediaRemoteSendCommand`（dlsym）。
 final class NowPlayingMonitor: ObservableObject {
     static let shared = NowPlayingMonitor()
@@ -59,6 +62,20 @@ final class NowPlayingMonitor: ObservableObject {
     private static let interval: TimeInterval = 2
     /// 连续多少次读不到内容后才清空展示(避免瞬时失败闪空)
     private static let staleLimit = 3
+    /// 「正在播放」卡片只展示/控制这些 app。用 `sameApp` 前缀比对，
+    /// 这样 Chrome 的 audio helper（com.google.Chrome.helper）、
+    /// QQ音乐被归并的 WebKit 媒体进程（归并后是宿主 bundle）都能命中。
+    private static let allowedBundles = [
+        "com.google.Chrome",
+        "com.tencent.QQMusicMac",
+        "com.apple.Music",
+    ]
+
+    /// bundleID 是否在白名单里（nil = 无归属，一律拒绝）
+    static func isAllowed(_ bundleID: String?) -> Bool {
+        guard let bundleID else { return false }
+        return allowedBundles.contains { AudioActivityMonitor.sameApp(bundleID, $0) }
+    }
 
     enum Command: UInt {
         case togglePlay = 2
@@ -90,6 +107,11 @@ final class NowPlayingMonitor: ObservableObject {
     private var sawSilence = false
     private var inFlight = false
     private var staleCount = 0
+    /// 「混音有声但出声列表为空」的连续补查次数。进程注册只会比声音晚一拍，
+    /// 连补 `emptyRetryLimit` 次还是空，说明响的是白名单外的 app——再补就是每轮白跑一次
+    /// osascript 子进程（Safari 放视频时实测会一直触发）
+    private var emptyRetries = 0
+    private static let emptyRetryLimit = 3
     /// 「当前播放器」：**粘性**状态，只有「有 app 新开播」或它退出才换人，暂停不换。
     /// 暂停就换人会让卡片落到「媒体键控不到的 app」上——点暂停反而把上一个播放器拉起来，
     /// 最后两个都在播（见 DEV-084）。只在轮询队列里读写。
@@ -122,6 +144,8 @@ final class NowPlayingMonitor: ObservableObject {
     private var lastDebugSummary: String?
     /// 上一次的出声列表摘要（同上，只在变化时打）
     private var lastActivesSummary: String?
+    /// 上一次被白名单挡掉的摘要（同上）
+    private var lastBlockedSummary: String?
     /// 上一次真正跑完轮询的时刻，用来给「声音刚开始」触发的补查限流
     private var lastTickAt: CFAbsoluteTime = 0
     /// 上一次「有声但认不出是谁」的补查时刻
@@ -205,6 +229,8 @@ final class NowPlayingMonitor: ObservableObject {
             audioOnlyKey = nil
             queue.async { [weak self] in
                 self?.probeEnabled = true
+                // 补查计数只在轮询队列里读写，重置也放这里
+                self?.emptyRetries = 0
             }
             tick()
         } else {
@@ -225,6 +251,7 @@ final class NowPlayingMonitor: ObservableObject {
             nowPlaying = nil
             staleCount = 0
             lastDebugSummary = nil
+            lastBlockedSummary = nil
         }
     }
 
@@ -243,7 +270,10 @@ final class NowPlayingMonitor: ObservableObject {
 
     private func checkActivity() {
         guard timer != nil, !inFlight else { return }
-        let bundles = AudioActivityMonitor.activeApps().map { $0.bundleID ?? "?" }
+        // 先过白名单：非白名单 app 的进出不该触发补查，也不该参与播放态锁存
+        let bundles = AudioActivityMonitor.activeApps()
+            .filter { Self.isAllowed($0.bundleID) }
+            .map { $0.bundleID ?? "?" }
         let set = Set(bundles)
         guard set != lastActiveSet else { return }
         let entered = set.subtracting(lastActiveSet)
@@ -470,19 +500,31 @@ final class NowPlayingMonitor: ObservableObject {
         // 会话必须走子进程读：进程内的 `MRNowPlayingRequest` 属性**冻结在首次读取**
         // （实测 app 退出 12s 后长跑进程还报它的 bundleID，新进程立刻正确），
         // 而 C 接口在这版 macOS 上被阉（PID 恒 0、DisplayID 恒 nil），见 DEV-082
-        let media = readNowPlaying()
+        let rawMedia = readNowPlaying()
+        // 白名单：非白名单 app 的上报会话直接丢弃。不丢的话 `current` 为空时
+        // 会退到「暂停态会话」那条分支直接出卡（Safari/语音备忘录都会走到这里）
+        let media = rawMedia.flatMap { Self.isAllowed($0.appBundleID) ? $0 : nil }
         // owner 就用会话自己报的 bundleID——它和媒体键的目标是同一个，而且比单独再查一次省事
         let owner = media?.appBundleID ?? Self.nowPlayingOwnerBundleID()
-        let actives = AudioActivityMonitor.activeApps(owner: owner)
+        let rawActives = AudioActivityMonitor.activeApps(owner: owner)
+        let actives = rawActives.filter { Self.isAllowed($0.bundleID) }
+        logBlocked(rawMedia, media: media, rawActives: rawActives, actives: actives)
         logActives(actives, owner: owner, audible: audible)
         trackOperations(actives: actives, media: media, owner: owner, audible: audible)
         updateCurrent(actives, media: media, owner: owner)
         syncProbeTarget()
 
         // 有声但还没认出是谁在出声（进程注册比声音晚一拍）：马上补查一次，
-        // 不然要等下一个 2s 轮询，体感就是「浏览器切回 QQ音乐很慢」
-        if audible == true, actives.isEmpty, let retry = quickRetry() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + retry) { [weak self] in self?.tick() }
+        // 不然要等下一个 2s 轮询，体感就是「浏览器切回 QQ音乐很慢」。
+        // 但连补 `emptyRetryLimit` 次还是空就不再补——白名单外的 app 在响时
+        // 出声列表永远是空的，不设上限就是每秒一次子进程（Safari 放视频实测）
+        if audible == true, actives.isEmpty {
+            if emptyRetries < Self.emptyRetryLimit, let retry = quickRetry() {
+                emptyRetries += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + retry) { [weak self] in self?.tick() }
+            }
+        } else {
+            emptyRetries = 0
         }
 
         if let cur = current {
@@ -508,8 +550,10 @@ final class NowPlayingMonitor: ObservableObject {
     /// 卡片一旦跟着声音跑到别人身上，按钮就控不到卡片上的人了（DEV-081/084）。
     private func updateCurrent(_ actives: [AudioActivity], media: NowPlayingInfo?, owner: String?) {
         let now = CFAbsoluteTimeGetCurrent()
-        // 当前播放器退出了：让位
-        if let cur = current, livePID(for: cur) == nil { current = nil }
+        // 当前播放器退出了，或者不在白名单（改白名单前认下的残留）：让位
+        if let cur = current, livePID(for: cur) == nil || !Self.isAllowed(cur.bundleID) {
+            current = nil
+        }
 
         // 出声列表里「最后被操作」的那个（时间戳相同按数组顺序，owner/媒体类在前，别用不稳定排序）
         let ranked = actives.enumerated().sorted { lhs, rhs in
@@ -681,6 +725,26 @@ final class NowPlayingMonitor: ObservableObject {
         guard Self.debug, summary != lastDebugSummary else { return }
         lastDebugSummary = summary
         ZSLog("NowPlaying: \(summary)")
+    }
+
+    /// 白名单挡掉了谁：只在变化时打。排查「明明在放歌但卡片是空的」时，先看这条
+    private func logBlocked(_ rawMedia: NowPlayingInfo?, media: NowPlayingInfo?,
+                            rawActives: [AudioActivity], actives: [AudioActivity]) {
+        guard Self.debug else { return }
+        let mediaSummary: String
+        if let rawMedia, media == nil {
+            mediaSummary = rawMedia.appBundleID ?? "?"
+        } else {
+            mediaSummary = "-"
+        }
+        let activesSummary = rawActives
+            .filter { !Self.isAllowed($0.bundleID) }
+            .map { $0.bundleID ?? "?" }
+            .joined(separator: ",")
+        let summary = "media=\(mediaSummary) actives=[\(activesSummary)]"
+        guard summary != lastBlockedSummary else { return }
+        lastBlockedSummary = summary
+        ZSLog("NowPlaying: 白名单过滤 \(summary)")
     }
 
     /// 出声列表只在变化时打一条：排查「明明有声音但列表是空的」时，这条是唯一线索

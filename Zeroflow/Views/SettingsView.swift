@@ -108,7 +108,7 @@ struct SettingsView: View {
         Form {
             Section {
                 Toggle(L10n.tr("启用截图功能"), isOn: $store.screenshotEnabled)
-                    .onChange(of: store.screenshotEnabled) { enabled in
+                    .onChange(of: store.screenshotEnabled) { _, enabled in
                         guard enabled else { return }
                         // 用便宜的 preflight 判断（不弹窗），未授权再弹系统授权窗，避免重复弹窗
                         if !ScreenRecordingPermission.isGranted {
@@ -192,11 +192,11 @@ struct SettingsView: View {
         Form {
             Section {
                 Toggle(L10n.tr("垂直滚动反向"), isOn: $store.reverseMouseScrollVertical)
-                    .onChange(of: store.reverseMouseScrollVertical) { enabled in
+                    .onChange(of: store.reverseMouseScrollVertical) { _, enabled in
                         requestAccessibilityIfNeeded(enabled)
                     }
                 Toggle(L10n.tr("水平滚动反向"), isOn: $store.reverseMouseScrollHorizontal)
-                    .onChange(of: store.reverseMouseScrollHorizontal) { enabled in
+                    .onChange(of: store.reverseMouseScrollHorizontal) { _, enabled in
                         requestAccessibilityIfNeeded(enabled)
                     }
             } header: {
@@ -230,7 +230,7 @@ struct SettingsView: View {
         Form {
             Section {
                 Toggle(L10n.tr("用 ⌘⇥ 显示窗口缩略图"), isOn: $store.cmdTabSwitcherEnabled)
-                    .onChange(of: store.cmdTabSwitcherEnabled) { enabled in
+                    .onChange(of: store.cmdTabSwitcherEnabled) { _, enabled in
                         guard enabled else { return }
                         if !AccessibilityPermission.isGranted {
                             AccessibilityPermission.requestAuthorization()
@@ -296,7 +296,7 @@ struct SettingsView: View {
         Form {
             Section {
                 Toggle(L10n.tr("悬停 Dock 图标显示窗口缩略图"), isOn: $store.dockPreviewEnabled)
-                    .onChange(of: store.dockPreviewEnabled) { enabled in
+                    .onChange(of: store.dockPreviewEnabled) { _, enabled in
                         guard enabled else { return }
                         if !AccessibilityPermission.isGranted {
                             AccessibilityPermission.requestAuthorization()
@@ -470,7 +470,7 @@ struct SettingsView: View {
         Form {
             Section {
                 Toggle(L10n.tr("启用灵动岛"), isOn: $store.notchEnabled)
-                    .onChange(of: store.notchEnabled) { enabled in
+                    .onChange(of: store.notchEnabled) { _, enabled in
                         guard enabled else { return }
                         if !AccessibilityPermission.isGranted {
                             AccessibilityPermission.requestAuthorization()
@@ -632,7 +632,7 @@ struct SettingsView: View {
         Form {
             Section {
                 Toggle(L10n.tr("单击 Dock 图标最小化窗口"), isOn: $store.dockClickMinimize)
-                    .onChange(of: store.dockClickMinimize) { enabled in
+                    .onChange(of: store.dockClickMinimize) { _, enabled in
                         guard enabled else { return }
                         if !AccessibilityPermission.isGranted {
                             AccessibilityPermission.requestAuthorization()

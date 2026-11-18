@@ -117,14 +117,23 @@ enum ScreenCapture {
         filterCacheLock.unlock()
     }
 
+    /// 加锁读写包成同步函数：`contentFilter` 是 async 的，直接在 async 上下文里调 `NSLock.lock/unlock`
+    /// 在 Swift 6 下是编译错误（跨 await 持锁），锁必须收在同步作用域内。
+    private static func cachedFilter(for displayID: CGDirectDisplayID) -> SCContentFilter? {
+        filterCacheLock.lock()
+        defer { filterCacheLock.unlock() }
+        return filterCache[displayID]
+    }
+
+    private static func storeFilter(_ filter: SCContentFilter, for displayID: CGDirectDisplayID) {
+        filterCacheLock.lock()
+        defer { filterCacheLock.unlock() }
+        filterCache[displayID] = filter
+    }
+
     /// 取屏幕对应的 contentFilter：缓存命中直接复用，未命中才枚举 SCShareableContent
     private static func contentFilter(for displayID: CGDirectDisplayID) async -> SCContentFilter? {
-        filterCacheLock.lock()
-        if let cached = filterCache[displayID] {
-            filterCacheLock.unlock()
-            return cached
-        }
-        filterCacheLock.unlock()
+        if let cached = cachedFilter(for: displayID) { return cached }
 
         do {
             let content = try await SCShareableContent.current
@@ -133,9 +142,7 @@ enum ScreenCapture {
                 return nil
             }
             let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
-            filterCacheLock.lock()
-            filterCache[displayID] = filter
-            filterCacheLock.unlock()
+            storeFilter(filter, for: displayID)
             return filter
         } catch {
             ZSLog("SCShareableContent error: \(error)")

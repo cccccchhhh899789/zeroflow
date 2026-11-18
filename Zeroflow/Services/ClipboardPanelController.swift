@@ -163,7 +163,7 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         ZSLog("clipboard panel dismissed")
         if didActivateApp {
             didActivateApp = false
-            previousApp?.activate(options: [.activateIgnoringOtherApps])
+            previousApp?.activate()
         }
     }
 
@@ -314,7 +314,7 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
     /// 展开预览：先把内容布局+绘制完，再让窗口生长。
     /// 顺序反了的话窗口先变宽、内容后画，中间那几帧窗口显示的是被横向拉伸的旧内容（DEV-068）
     private func expandPreview(with item: ClipboardItem) {
-        guard let panel, let model else { return }
+        guard panel != nil, let model else { return }
         // 幂等：同一项已经设过 previewItem（展开在途或已完成）就不再触发第二次，
         // 否则两条入口（停留计时 / 调试入口）会让窗口动画被重新起手
         if model.previewItem?.id == item.id { return }

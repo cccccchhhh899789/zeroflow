@@ -207,7 +207,7 @@ struct ClipboardPanelView: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 4)
             }
-            .onChange(of: model.selectedIndex) { _ in
+            .onChange(of: model.selectedIndex) {
                 // 鼠标 hover 引起的选中变化不滚动，避免列表在光标下跑掉
                 guard !model.selectionFromPointer else { return }
                 let list = model.filteredItems

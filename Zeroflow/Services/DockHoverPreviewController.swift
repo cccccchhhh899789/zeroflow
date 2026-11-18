@@ -1375,8 +1375,8 @@ final class DockHoverPreviewController {
                     return
                 }
                 self.lock.unlock()
-                self.workQueue.async { [weak self] in
-                    let windows = self?.windows(for: target) ?? []
+                self.workQueue.async { [self] in
+                    let windows = self.windows(for: target)
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
                         self.lock.lock()

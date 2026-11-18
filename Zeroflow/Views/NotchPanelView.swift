@@ -294,6 +294,10 @@ struct NotchContentView: View {
     /// 滑动进度驱动器：面板弹簧逐帧写 progress，两个卡片包装视图只观察它做位移。
     /// 这里用普通属性（默认实例）而不是 @ObservedObject，避免整个内容视图按 120Hz 重算
     var slideDriver = CardSlideDriver()
+    /// 「一键清理缓存」按钮的状态（idle / running / finished），资源卡底部按钮据此换文案
+    @ObservedObject private var cacheCleaner = CacheCleaner.shared
+    /// 每次清理完成 +1，驱动资源环表重播「0 → 当前值」的增长动画
+    @State private var ringResetToken = 0
 
     private let accent = Color.accentColor
     private static let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 7)
@@ -317,8 +321,14 @@ struct NotchContentView: View {
     /// 系统资源列自然宽度：两列主要项环（CPU/内存）之间的空白要放得下浮动的 GPU 小环，
     /// 读数行与通栏趋势线也需要横向空间（与日历卡片同宽 320，观感统一）
     private static let resourcesColumnWidth: CGFloat = 300
-    /// 正在播放列自然宽度
-    private static let musicColumnWidth: CGFloat = 224
+    /// 正在播放列自然宽度：曲名 + 歌手 + 进度 + 三个控制按钮要横着排开，太窄会挤成一团
+    private static let musicColumnWidth: CGFloat = 300
+    /// 正在播放卡片内容高度（固定）。轮询数据比面板弹出晚几十毫秒，
+    /// 按内容自适应测量会先测到空态高度，数据到达后内容就被裁掉（实测 108 高的卡片装不下 160 的内容）。
+    /// 130 = 顶栏 14 + 曲目行 28 + 频谱 18 + 进度 20 + 按钮 26 + 四段间距 24
+    private static let musicCardContentHeight: CGFloat = 130
+    /// 频谱条高度（含最大振幅），宽度撑满内容列
+    private static let spectrumStripHeight: CGFloat = 18
 
     /// 模块自然列宽（卡片宽 = 列宽 + 左右内边距，即卡片宽度不会超过此自然尺寸）
     static func naturalColumnWidth(for module: Module) -> CGFloat {
@@ -357,10 +367,16 @@ struct NotchContentView: View {
     }
 
     var body: some View {
-        if displayWidth == nil {
-            measureBody
-        } else {
-            renderBody
+        Group {
+            if displayWidth == nil {
+                measureBody
+            } else {
+                renderBody
+            }
+        }
+        // 「一键清理」完成后重播一次环表的「0 → 当前值」增长动画（只影响显示，不动采样）
+        .onChange(of: cacheCleaner.state) { _, newState in
+            if case .finished = newState { ringResetToken += 1 }
         }
     }
 
@@ -570,7 +586,7 @@ struct NotchContentView: View {
     // MARK: - 系统资源模块
 
     /// 资源卡分块尺寸：上半块（主要项 CPU/内存 环形仪表，GPU 小环浮在两环之间的空白正中）
-    /// 与下半块（磁盘/网络 上下两行：标题 + 读数一行，趋势线通栏拉满）；上下两块之间一条细分隔线。
+    /// 与下半块（磁盘/网络 各一行：标题 + 读数）；上下两块之间、底部清理按钮之上各一条细分隔线。
     private static let resourceHalfHeight: CGFloat = 88
     private static let resourceCellGap: CGFloat = 8
     /// 顶部条与上半块、上半块与下半块之间的间距（细分隔线上下的留白同值）
@@ -581,22 +597,20 @@ struct NotchContentView: View {
     private static let gpuRingSize: CGFloat = 34
     private static let gpuRingLineWidth: CGFloat = 3
     private static let resourceRateRowGap: CGFloat = 8
-    /// 趋势线通栏（标题与读数独占一行），比左右分栏时长一倍以上
-    private static let resourceSparklineHeight: CGFloat = 24
 
     /// 主要项（环形仪表，占上半块）：固定顺序 CPU → 内存
     private var primaryResourceItems: [NotchResourceItem] {
         enabledResourceItems.filter { $0 == .cpu || $0 == .memory }
     }
 
-    /// 速率项（占下半块）：固定顺序 磁盘 → 网络（上下两行，趋势线可拉长）
+    /// 速率项（占下半块）：固定顺序 磁盘 → 网络（各一行文字读数）
     private var rateResourceItems: [NotchResourceItem] {
         enabledResourceItems.filter { $0 == .disk || $0 == .network }
     }
 
     /// 系统资源卡：上半块 = CPU/内存 环形仪表各占一格（共半块），GPU 小环浮在两环之间的空白正中；
-    /// 下半块 = 磁盘/网络 上下两行（标题+读数一行 + 通栏趋势线）。
-    /// 紧凑密度（屏幕极矮兜底）= 每项单行。
+    /// 下半块 = 磁盘/网络 各一行（标题 + 读数）；底部一条「一键清理缓存」按钮。
+    /// 紧凑密度（屏幕极矮兜底）= 每项单行，且不显示清理按钮。
     private func resourcesColumn(inner: CGFloat) -> some View {
         let primary = primaryResourceItems
         let rates = rateResourceItems
@@ -616,20 +630,58 @@ struct NotchContentView: View {
                     resourceUpperHalf(primary: primary, showGPU: showGPU, inner: inner)
                 }
                 if hasUpper && !rates.isEmpty {
-                    Rectangle()
-                        .fill(Color.primary.opacity(0.06))
-                        .frame(height: 0.5)
-                        .padding(.vertical, Self.resourceHalfDividerGap)
+                    halfDivider
                 }
                 if !rates.isEmpty {
-                    VStack(alignment: .leading, spacing: Self.resourceRateRowGap) {
-                        ForEach(rates, id: \.self) { rateResourceRow($0, width: inner) }
-                    }
-                    .frame(width: inner)
+                    rateColumns(rates, inner: inner)
+                }
+                if hasUpper || !rates.isEmpty {
+                    halfDivider
+                    cacheCleanButton(inner: inner)
                 }
             }
         }
         .frame(width: inner)
+    }
+
+    /// 资源卡内部的细分隔线（上下的留白同值）
+    private var halfDivider: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.06))
+            .frame(height: 0.5)
+            .padding(.vertical, Self.resourceHalfDividerGap)
+    }
+
+    /// 底部「一键清理」按钮：宽度只包住文字（不铺满整列），水平居中于卡片；
+    /// idle = 提示文案，清理中 = 进行中文案，完成后就地显示释放体积（4s 后回到 idle）
+    private func cacheCleanButton(inner: CGFloat) -> some View {
+        let state = cacheCleaner.state
+        let cleaning = state == .running
+        return Button {
+            cacheCleaner.clean()
+        } label: {
+            Text(cacheCleanLabel(state))
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundColor(cleaning ? .secondary : Color.accentColor)
+                .lineLimit(1)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(cleaning)
+        .help(L10n.tr("清理 ~/Library/Caches、各沙盒容器缓存与 ~/Library/Logs；不会删除任何文档，清理后部分应用首次启动会稍慢"))
+        .frame(width: inner)
+    }
+
+    private func cacheCleanLabel(_ state: CacheCleaner.State) -> String {
+        switch state {
+        case .idle: return L10n.tr("一键清理")
+        case .running: return L10n.tr("正在清理…")
+        case .finished(let freed):
+            guard freed > 0 else { return L10n.tr("没有可清理的缓存") }
+            return L10n.tr("已清理 %@", arguments: SystemResourceMonitor.formatSize(freed))
+        }
     }
 
     /// 上半块：CPU/内存 环各占一格；GPU 小环浮在两格之间的空白正中（不占格、不挤主项）。
@@ -656,11 +708,11 @@ struct NotchContentView: View {
     private var gpuBadge: some View {
         VStack(spacing: 2) {
             ResourceRing(progress: normalizedProgress(.gpu),
-                         text: percentText(.gpu),
                          size: Self.gpuRingSize,
                          lineWidth: Self.gpuRingLineWidth,
                          fontSize: 10,
-                         tint: ringTint(.gpu))
+                         tint: ringTint(.gpu),
+                         resetToken: ringResetToken)
             Text(NotchResourceItem.gpu.title)
                 .font(.system(size: 9.5))
                 .foregroundColor(.secondary)
@@ -675,55 +727,117 @@ struct NotchContentView: View {
         return (inner - Self.resourceCellGap * CGFloat(n - 1)) / CGFloat(n)
     }
 
-    /// 主要项单元格：环形仪表（环心 = 百分比）+ 名称 + 副信息（CPU 核心数 / 内存 已用-总量）
+    /// 主要项单元格：环形仪表（环心 = 百分比）+ 名称 + 副信息（CPU 温度 · 核心数 / 内存 已用-总量）
     private func primaryResourceCell(_ item: NotchResourceItem, width: CGFloat) -> some View {
         VStack(spacing: 3) {
             ResourceRing(progress: normalizedProgress(item),
-                         text: percentText(item),
                          size: Self.primaryRingSize,
                          lineWidth: Self.primaryRingLineWidth,
                          fontSize: 15,
-                         tint: ringTint(item))
+                         tint: ringTint(item),
+                         resetToken: ringResetToken)
             Text(item.title)
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .lineLimit(1)
-            Text(primaryDetail(item))
-                .font(.system(size: 10, weight: .medium))
-                .monospacedDigit()
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
+            primaryDetailView(item)
         }
         // minHeight 而非固定高：内容永远不被迫溢出，两块等高至少各占半块
         .frame(width: width)
         .frame(minHeight: Self.resourceHalfHeight)
     }
 
-    /// 速率项一行：标题 + 两向读数占一行，趋势线整条通栏（线长拉满内宽）
-    private func rateResourceRow(_ item: NotchResourceItem, width: CGFloat) -> some View {
-        let lines = rateLines(item)
+    /// 副信息行：CPU 把温度放在最前并按阈值变色（≥75°C 黄、≥90°C 红），其余项走纯文字
+    @ViewBuilder
+    private func primaryDetailView(_ item: NotchResourceItem) -> some View {
+        let detail = primaryDetail(item)
+        if item == .cpu, let temp = SystemResourceMonitor.shared.sample.cpuTempC {
+            HStack(spacing: 3) {
+                Text(String(format: "%.0f°C", temp))
+                    .foregroundColor(temperatureTint(temp))
+                Text("·")
+                    .foregroundColor(.secondary)
+                Text(detail)
+                    .foregroundColor(.secondary)
+            }
+            .font(.system(size: 10, weight: .medium))
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+        } else {
+            Text(detail)
+                .font(.system(size: 10, weight: .medium))
+                .monospacedDigit()
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+    }
+
+    /// 温度色相：< 60 常态、60–89 黄、≥ 90 红
+    private func temperatureTint(_ celsius: Double) -> Color {
+        if celsius >= 90 { return .red }
+        if celsius >= 60 { return .yellow }
+        return .secondary
+    }
+
+    /// 速率区：左右两栏（左 = 网络、右 = 磁盘，固定这个排法），每栏「图标 + 名称」一行 +
+    /// 读数两行（网络 ↑上行 / ↓下行，磁盘 读 / 写），两栏之间一条竖分隔线
+    private func rateColumns(_ items: [NotchResourceItem], inner: CGFloat) -> some View {
+        let ordered = [NotchResourceItem.network, .disk].filter { items.contains($0) }
+        let gap: CGFloat = 10
+        let dividerWidth: CGFloat = 0.5
+        let cellWidth = ordered.count > 1
+            ? (inner - dividerWidth - gap) / CGFloat(ordered.count)
+            : inner
+        return HStack(spacing: 0) {
+            ForEach(Array(ordered.enumerated()), id: \.element) { index, item in
+                if index > 0 {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(width: dividerWidth)
+                        .padding(.horizontal, (gap - dividerWidth) / 2)
+                }
+                rateCell(item, width: cellWidth)
+            }
+        }
+        .frame(width: inner)
+    }
+
+    /// 单个速率栏：图标 + 名称，下面两行「标签 + 读数」；内容块在各自格子内水平居中，
+    /// 两栏左右对称（栏内三行仍左对齐，保证标题与读数起点齐平）
+    private func rateCell(_ item: NotchResourceItem, width: CGFloat) -> some View {
+        let labels = rateLabels(item)
+        let values = rateValues(item)
         return VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: item.symbol)
+                    .font(.system(size: 9))
                 Text(item.title)
                     .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-                    .fixedSize()
-                Spacer(minLength: 4)
-                HStack(spacing: 8) {
-                    Text(lines.read)
-                    Text(lines.write)
-                }
+            }
+            .foregroundColor(.secondary)
+            .lineLimit(1)
+            rateLine(labels.top, values.top)
+            rateLine(labels.bottom, values.bottom)
+        }
+        .frame(width: width, alignment: .center)
+    }
+
+    /// 一行读数：方向/读写标签固定宽度，数值左对齐（两行数值起点对齐）
+    private func rateLine(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 3) {
+            Text(label)
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+                .frame(width: 11, alignment: .leading)
+            Text(value)
                 .font(.system(size: 9.5, weight: .medium))
                 .monospacedDigit()
                 .foregroundColor(.primary.opacity(0.9))
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            }
-            ResourceSparkline(normalizedValues: normalizedHistory(item))
-                .frame(height: Self.resourceSparklineHeight)
+                .minimumScaleFactor(0.75)
         }
-        .frame(width: width)
     }
 
     /// 紧凑密度兜底（屏幕极矮）：每项单行「图标 名称 … 数值」，无环、无趋势线
@@ -769,19 +883,6 @@ struct NotchContentView: View {
         }
     }
 
-    /// 迷你趋势图数据（仅速率项 磁盘/网络）：按窗口内峰值归一化（峰值下限 200KB/s 防除零全矮）
-    private func normalizedHistory(_ item: NotchResourceItem) -> [Double] {
-        let h = SystemResourceMonitor.shared.history
-        let raw: [Double]
-        switch item {
-        case .disk: raw = h.disk
-        case .network: raw = h.network
-        default: return []
-        }
-        let scale = max(raw.max() ?? 0, 200_000)
-        return raw.map { min(1, max(0, $0 / scale)) }
-    }
-
     private var enabledResourceItems: [NotchResourceItem] {
         SettingsStore.shared.notchResourceItems.compactMap { NotchResourceItem(rawValue: $0) }
     }
@@ -792,7 +893,7 @@ struct NotchContentView: View {
         return String(format: "%.0f%%", min(1, max(0, progress)) * 100)
     }
 
-    /// 主要项副信息：CPU = 核心数；内存 = 已用 / 总量
+    /// 主要项副信息：CPU = 核心数（温度由 `primaryDetailView` 单独渲染并着色）；内存 = 已用 / 总量
     private func primaryDetail(_ item: NotchResourceItem) -> String {
         let s = SystemResourceMonitor.shared.sample
         switch item {
@@ -807,20 +908,27 @@ struct NotchContentView: View {
         }
     }
 
-    /// 速率项两行数值：磁盘 = 读/写，网络 = 下行/上行；任一方向有值即显示，双向都缺失显示「—」
-    private func rateLines(_ item: NotchResourceItem) -> (read: String, write: String) {
+    /// 速率栏两行的标签：网络 ↑上行 / ↓下行，磁盘 读 / 写
+    private func rateLabels(_ item: NotchResourceItem) -> (top: String, bottom: String) {
+        switch item {
+        case .network: return ("↑", "↓")
+        case .disk: return (L10n.tr("读"), L10n.tr("写"))
+        case .cpu, .memory, .gpu: return ("", "")
+        }
+    }
+
+    /// 速率栏两行的数值：网络 = 上行 / 下行，磁盘 = 读 / 写；两向都缺失时显示「—」
+    private func rateValues(_ item: NotchResourceItem) -> (top: String, bottom: String) {
         let s = SystemResourceMonitor.shared.sample
         switch item {
-        case .disk:
-            guard s.diskReadBps != nil || s.diskWriteBps != nil else {
-                return ("\(L10n.tr("读")) —", "\(L10n.tr("写")) —")
-            }
-            return ("\(L10n.tr("读")) \(SystemResourceMonitor.formatBps(s.diskReadBps))",
-                    "\(L10n.tr("写")) \(SystemResourceMonitor.formatBps(s.diskWriteBps))")
         case .network:
-            guard s.netDownBps != nil || s.netUpBps != nil else { return ("↓ —", "↑ —") }
-            return ("↓ \(SystemResourceMonitor.formatBps(s.netDownBps))",
-                    "↑ \(SystemResourceMonitor.formatBps(s.netUpBps))")
+            guard s.netDownBps != nil || s.netUpBps != nil else { return ("—", "—") }
+            return (SystemResourceMonitor.formatBps(s.netUpBps),
+                    SystemResourceMonitor.formatBps(s.netDownBps))
+        case .disk:
+            guard s.diskReadBps != nil || s.diskWriteBps != nil else { return ("—", "—") }
+            return (SystemResourceMonitor.formatBps(s.diskReadBps),
+                    SystemResourceMonitor.formatBps(s.diskWriteBps))
         case .cpu, .memory, .gpu:
             return ("—", "—")
         }
@@ -832,56 +940,78 @@ struct NotchContentView: View {
         case .cpu, .memory, .gpu:
             return percentText(item)
         case .disk, .network:
-            let lines = rateLines(item)
-            return "\(lines.read) · \(lines.write)"
+            let values = rateValues(item)
+            return "\(values.top) · \(values.bottom)"
         }
     }
 
     // MARK: - 正在播放模块
 
     private func musicColumn(inner: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            moduleHeader("music.note", L10n.tr("正在播放"))
-            if let info = NowPlayingMonitor.shared.nowPlaying {
-                musicBody(info)
-            } else {
-                Text(L10n.tr("没有正在播放的音乐"))
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                    .padding(.top, 2)
-            }
-        }
-        .frame(width: inner)
-    }
-
-    private func musicBody(_ info: NowPlayingInfo) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                appIcon(info)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(info.appName ?? L10n.tr("未知应用"))
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "music.note")
+                    .font(.system(size: 10, weight: .medium))
+                // 左边放 app 名，右边放播放状态，避免「正在播放」出现两次
+                Text(NowPlayingMonitor.shared.nowPlaying?.appName ?? L10n.tr("正在播放"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                if let info = NowPlayingMonitor.shared.nowPlaying {
                     HStack(spacing: 4) {
                         Circle()
                             .fill(info.isPlaying ? Color.green : Color.secondary.opacity(0.5))
                             .frame(width: 5, height: 5)
                         Text(info.isPlaying ? L10n.tr("正在播放") : L10n.tr("已暂停"))
                             .font(.system(size: 10))
-                            .foregroundColor(.secondary)
                     }
                 }
             }
+            .foregroundColor(.secondary)
 
-            Text(info.title)
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(2)
+            if let info = NowPlayingMonitor.shared.nowPlaying {
+                musicBody(info)
+            } else {
+                Spacer(minLength: 0)
+                Text(L10n.tr("没有正在播放的音乐"))
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(width: inner, height: Self.musicCardContentHeight, alignment: .topLeading)
+    }
 
-            musicSubtitle(info)
+    private func musicBody(_ info: NowPlayingInfo) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Spacer(minLength: 6)
+
+            HStack(spacing: 10) {
+                appIcon(info)
+                VStack(alignment: .leading, spacing: 2) {
+                    // 拿不到曲名时 app 名顶上来当主标题
+                    Text(info.title ?? info.appName ?? L10n.tr("未知应用"))
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(1)
+                    if let subtitle = musicSubtitle(info) {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+
+            Spacer(minLength: 6)
+
+            spectrumStrip(info)
+
+            Spacer(minLength: 6)
 
             if let progress = musicProgress(info) {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.primary.opacity(0.15))
@@ -901,31 +1031,58 @@ struct NotchContentView: View {
                 }
             }
 
-            HStack(spacing: 18) {
-                musicButton("backward.fill", L10n.tr("上一首"), disabled: !NowPlayingMonitor.shared.controlsAvailable) {
+            Spacer(minLength: 6)
+
+            HStack(spacing: 32) {
+                // .none 说明这个 app 既不上报 Now Playing 也不是当前 owner，媒体键会打到别人身上
+                musicButton("backward.fill", L10n.tr("上一首"), disabled: info.control == .none) {
                     NowPlayingMonitor.shared.send(.previous)
                 }
                 musicButton(info.isPlaying ? "pause.fill" : "play.fill",
                             info.isPlaying ? L10n.tr("暂停") : L10n.tr("播放"),
-                            disabled: !NowPlayingMonitor.shared.controlsAvailable) {
+                            disabled: info.control == .none) {
                     NowPlayingMonitor.shared.send(.togglePlay)
                 }
-                musicButton("forward.fill", L10n.tr("下一首"), disabled: !NowPlayingMonitor.shared.controlsAvailable) {
+                musicButton("forward.fill", L10n.tr("下一首"), disabled: info.control == .none) {
                     NowPlayingMonitor.shared.send(.next)
                 }
             }
             .frame(maxWidth: .infinity)
+
+            Spacer(minLength: 0)
         }
     }
 
-    @ViewBuilder private func musicSubtitle(_ info: NowPlayingInfo) -> some View {
-        let parts = [info.artist, info.album].compactMap { $0 }
-        if !parts.isEmpty {
-            Text(parts.joined(separator: " · "))
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
+    /// 真实音频频谱：16 段对数频带，跟着系统混音律动；暂停或没抓到音频时压成一条基线。
+    /// 暂停时必须把柱子也压平：只降透明度的话柱子还在跟着别人的声音跳，
+    /// 和「播放/暂停图标」自相矛盾（用户就是靠律动判断图标的，见 DEV-085）。
+    /// 数据来自 `AudioSpectrumMonitor`（ScreenCaptureKit 音频捕获 → vDSP FFT），
+    /// 只在这个卡片宿主里被观察，所以 30fps 的重绘不会波及日历/资源卡（见 DEV-050）。
+    private func spectrumStrip(_ info: NowPlayingInfo) -> some View {
+        let levels = AudioSpectrumMonitor.shared.levels
+        let live = info.isPlaying && AudioSpectrumMonitor.shared.isCapturing
+        return HStack(alignment: .bottom, spacing: 0) {
+            ForEach(0..<AudioSpectrumMonitor.bandCount, id: \.self) { index in
+                let level = live && index < levels.count ? levels[index] : 0
+                // 最矮 2pt：静音时也留一条基线，卡片不会突然空一块
+                let barHeight = 2 + level * (Self.spectrumStripHeight - 2)
+                Capsule()
+                    .fill(
+                        LinearGradient(colors: [accent.opacity(0.95), accent.opacity(0.45)],
+                                       startPoint: .bottom, endPoint: .top)
+                    )
+                    .frame(width: 6, height: barHeight)
+                    .frame(maxWidth: .infinity)
+            }
         }
+        .frame(height: Self.spectrumStripHeight, alignment: .bottom)
+        .opacity(live ? 1 : 0.3)
+        .animation(.easeOut(duration: 0.2), value: live)
+    }
+
+    private func musicSubtitle(_ info: NowPlayingInfo) -> String? {
+        let parts = [info.artist, info.album].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func musicProgress(_ info: NowPlayingInfo) -> Double? {
@@ -952,7 +1109,7 @@ struct NotchContentView: View {
                     .foregroundColor(.secondary)
             }
         }
-        .frame(width: 22, height: 22)
+        .frame(width: 28, height: 28)
     }
 
     private static func icon(forBundleID bid: String) -> NSImage? {
@@ -960,16 +1117,7 @@ struct NotchContentView: View {
     }
 
     private func musicButton(_ symbol: String, _ label: String, disabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(disabled ? Color.secondary.opacity(0.4) : .primary)
-                .frame(width: 26, height: 22)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
-        .help(label)
+        MusicControlButton(symbol: symbol, label: label, disabled: disabled, action: action)
     }
 
     private func moduleHeader(_ icon: String, _ title: String) -> some View {
@@ -1135,90 +1283,139 @@ private struct ResourceCardHost<Content: View>: View {
     var body: some View { content() }
 }
 
+/// 播放控制按钮：动作走 `Button`，按下视觉走手势。
+///
+/// 不能只靠 `ButtonStyle.isPressed` 做反馈——触控板「轻点即点击」会在同一帧里
+/// down+up，按下态一闪而过，弹簧动画一帧都跑不出来（表现为只有真按住才看得到动画）。
+/// 这里让按下态至少可见 `minPressDuration`，轻点也能看到一次完整的按下→回弹。
+private struct MusicControlButton: View {
+    let symbol: String
+    let label: String
+    let disabled: Bool
+    let action: () -> Void
+
+    @State private var pressed = false
+    @State private var releaseTask: DispatchWorkItem?
+
+    private static let minPressDuration: TimeInterval = 0.12
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(disabled ? Color.secondary.opacity(0.4) : .primary)
+                .frame(width: 32, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(label)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(pressed ? 0.16 : 0))
+        )
+        .scaleEffect(pressed ? 0.84 : 1)
+        .animation(.spring(response: 0.18, dampingFraction: 0.55), value: pressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in pressDown() }
+                .onEnded { _ in pressUp() }
+        )
+    }
+
+    private func pressDown() {
+        guard !disabled else { return }
+        releaseTask?.cancel()
+        releaseTask = nil
+        pressed = true
+    }
+
+    private func pressUp() {
+        guard pressed else { return }
+        let task = DispatchWorkItem { pressed = false }
+        releaseTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.minPressDuration, execute: task)
+    }
+}
+
 private struct MusicCardHost<Content: View>: View {
     @ObservedObject private var monitor = NowPlayingMonitor.shared
+    // 频谱 30fps 更新，必须跟着卡片宿主走，挂到顶层会把日历月网格一起重算（见 DEV-050）
+    @ObservedObject private var spectrum = AudioSpectrumMonitor.shared
     let content: () -> Content
 
     var body: some View { content() }
 }
 
 /// 资源项的环形仪表：灰色轨道 = 无用量参照，彩色弧（各资源项各自的色相）= 当前用量
-/// （自 12 点顺时针），环心为数值文字（不可用时显示「—」）；用量变化做 0.4s 缓出插值
-/// （2s 采样不至于跳变）
+/// （自 12 点顺时针），环心为百分比文字；用量变化做 0.4s 缓出插值（2s 采样不至于跳变）。
+/// `resetToken` 变化时先把弧与数字瞬间归零、再用 0.9s 长回当前值 —— 「一键清理」后的
+/// 回弹动画，纯显示层，不触碰采样数据。
 private struct ResourceRing: View {
     let progress: Double?
-    let text: String
     let size: CGFloat
     let lineWidth: CGFloat
     let fontSize: CGFloat
     let tint: Color
+    /// 变化即重播一次「0 → 当前值」的增长动画
+    var resetToken: Int = 0
+
+    @State private var displayed: Double = 0
 
     var body: some View {
         ZStack {
             Circle()
                 .inset(by: lineWidth / 2)
                 .stroke(Color.primary.opacity(0.15), lineWidth: lineWidth)
-            if let progress, progress > 0.001 {
-                Circle()
-                    .inset(by: lineWidth / 2)
-                    .trim(from: 0, to: min(1, max(0, progress)))
-                    .stroke(tint,
-                            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .animation(.easeOut(duration: 0.4), value: progress)
-            }
-            Text(text)
-                .font(.system(size: fontSize, weight: .semibold))
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-                .padding(.horizontal, lineWidth + 1)
+            // 弧始终挂在树上（trim 长度 0 时不可见）：若按 displayed > 0 条件插入，
+            // 动画起手那一刻视图才出现，会表现成「淡入」而不是从 0 顺着轨道长出来
+            Circle()
+                .inset(by: lineWidth / 2)
+                .trim(from: 0, to: min(1, max(0, displayed)))
+                .stroke(tint,
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            RingValueText(value: displayed,
+                          isAvailable: progress != nil,
+                          fontSize: fontSize,
+                          lineWidth: lineWidth)
         }
         .frame(width: size, height: size)
+        .onAppear { displayed = progress ?? 0 }
+        .onChange(of: progress) { _, newValue in
+            withAnimation(.easeOut(duration: 0.4)) { displayed = newValue ?? 0 }
+        }
+        .onChange(of: resetToken) { _, _ in
+            // 瞬间归零（不带过渡），再让弧沿轨道从 0 长回当前值（仪表盘式转圈）
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { displayed = 0 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                withAnimation(.easeOut(duration: 1.1)) { displayed = progress ?? 0 }
+            }
+        }
     }
 }
 
-/// 资源行的迷你趋势图：无坐标轴的单色渐变面积线（数据已归一化到 0–1）
-private struct ResourceSparkline: View {
-    let normalizedValues: [Double]
+/// 环心数值：遵循 `Animatable`，随弧一起逐帧插值（纯 `Text` 只会跳到最终值，不会「涨」）
+private struct RingValueText: View, Animatable {
+    var value: Double
+    let isAvailable: Bool
+    let fontSize: CGFloat
+    let lineWidth: CGFloat
+
+    var animatableData: Double {
+        get { value }
+        set { value = newValue }
+    }
 
     var body: some View {
-        GeometryReader { proxy in
-            let w = proxy.size.width
-            let h = proxy.size.height
-            if normalizedValues.count >= 2, w > 0, h > 2 {
-                let step = w / CGFloat(normalizedValues.count - 1)
-                let points = normalizedValues.enumerated().map { pair -> CGPoint in
-                    CGPoint(x: CGFloat(pair.offset) * step,
-                            y: (1 - CGFloat(min(1, max(0, pair.element)))) * (h - 2) + 1)
-                }
-                ZStack {
-                    areaPath(points: points, bottom: h)
-                        .fill(LinearGradient(colors: [Color.accentColor.opacity(0.35),
-                                                      Color.accentColor.opacity(0.05)],
-                                             startPoint: .top, endPoint: .bottom))
-                    linePath(points: points)
-                        .stroke(Color.accentColor,
-                                style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round))
-                }
-            }
-        }
-    }
-
-    private func linePath(points: [CGPoint]) -> Path {
-        var path = Path()
-        path.addLines(points)
-        return path
-    }
-
-    private func areaPath(points: [CGPoint], bottom: CGFloat) -> Path {
-        var path = Path()
-        guard let first = points.first, let last = points.last else { return path }
-        path.move(to: CGPoint(x: first.x, y: bottom))
-        path.addLines(points)
-        path.addLine(to: CGPoint(x: last.x, y: bottom))
-        path.closeSubpath()
-        return path
+        Text(isAvailable ? String(format: "%.0f%%", min(1, max(0, value)) * 100) : "—")
+            .font(.system(size: fontSize, weight: .semibold))
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .padding(.horizontal, lineWidth + 1)
     }
 }
 

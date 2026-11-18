@@ -212,7 +212,7 @@ struct EditorView: View {
             .onAppear {
                 updateGeometry(size: geo.size)
             }
-            .onChange(of: geo.size) { newSize in
+            .onChange(of: geo.size) { _, newSize in
                 updateGeometry(size: newSize)
             }
         }
@@ -679,7 +679,7 @@ struct EditorView: View {
     /// 马赛克涂抹绘制：整图像素化（网格对齐图片原点）后裁剪到每个涂抹圆形区域。
     /// 临时笔划与已提交笔划共用同一张叠加图，保证预览、提交、导出的样式完全一致。
     private func drawMosaic(_ mosaic: MosaicElement, context: GraphicsContext) {
-        guard let first = mosaic.points.first else { return }
+        guard !mosaic.points.isEmpty else { return }
         let r = mosaic.radius
         var mask = Path()
         for p in mosaic.points {
@@ -1253,7 +1253,7 @@ struct EditorView: View {
     }
 
     private static func drawMosaicIntoCanvas(_ mosaic: MosaicElement, image: NSImage) {
-        guard let first = mosaic.points.first else { return }
+        guard !mosaic.points.isEmpty else { return }
         let r = mosaic.radius
         let fullRect = CGRect(origin: .zero, size: image.size)
         guard let overlay = Self.pixelatedImage(image, in: fullRect,

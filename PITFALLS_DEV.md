@@ -359,3 +359,211 @@
 - **Prevention:** 新增 `probeLiveSwitchIfNeeded`：`.visible` 且指针在 Dock 边带内、**沿 Dock 轴**位移 ≥ `liveProbeAxisDelta = 8pt` 时（节流 `liveProbeInterval = 100ms`）问一次 AX 权威命中「这个点是哪个图标」；命中另一个目标就 `scheduleShow(hoverDelay)` 走正常换目标流程。三条硬约束：① AX 调用**必须**异步跑在 `workQueue`——事件 tap 有响应超时，慢了会被系统直接停掉；② 只认沿 Dock 轴的位移，法线方向（图标→面板）不触发，否则会打掉 DEV-060/061 的保活语义；③ 指针在 `panelFrameTL` 内直接跳过（面板下沿可能压进边缘带）。配套：`failResolve` 增加 `differentTarget` 参数——实时命中已确认指针在**另一个**图标上且该目标无窗口时直接 `hidePanel`，不再问保活区；`currentTargetKey`（present 写入 / hidePanel / failResolve 清空）提供身份比对，`pendingSwitchKey` 防止连续 move 反复重置防抖。
 - **代价:** 面板显示且指针移动时最多 10 次/秒 AX 命中（静止悬停零开销）。AX 命中抖动仍由 1.2s 重试预算兜（DEV-064）。
 - **验证:** `dockPreviewDebug` 打开后 A → B(无窗口)：日志应出现 `switch by live hit pt=... -> app:...`，随后 `hide (target has no windows)`，面板在指针进入 B 后约 100–400ms 内收起（= 探测节流 + 换目标防抖），不再等走到 B 偏右。回归项：DEV-061 的「去面板途中蹭到隔壁图标」仍应是 `keep panel, resolve miss`；DEV-060 慢速从图标移到面板仍不掉。
+
+## DEV-068: 剪贴板面板展开预览时「整体闪一下」——窗口动画跑在 window server，内容重画在主线程
+- **Pitfall:** 剪贴板历史面板里某条记录停留超过 `clipboardPreviewDelayMs`（默认 1s）后，窗口从 360 长到 821 展开预览，整个面板闪一下：列表被横向拉宽再弹回。**文本只有 8 行也会出现**，跟内容体积无关。
+- **Cause:** `panel.animator().setFrame(_:display:)` 的动画由 window server 推进，不受主线程影响；而内容重画必须在主线程。SwiftUI 首次布局（哪怕只有 8 行文本）要 30–45ms，这段时间主线程不处理 resize 事件，窗口已经从 360 长到 560，backing store 还是 360 宽 → window server 只能把它横向拉宽去填新宽度 → 整块内容变形一下再弹回。实测时间轴（短文本）：窗口 `+45@560 +60@621 +77@676 ...`，内容 `+45@560 +60@621 +77@676 ...` —— 两者同步，说明 **app 在 +45ms 才第一次处理 resize，此时窗口早已 560**。停顿越长拉伸越久：短文本 45ms（≈3 帧），60KB 文本 425ms（≈25 帧）。换成纯色背景、关掉窗口动画，卡顿依旧（413 vs 416ms），证明与玻璃和动画无关，只与「主线程停顿 + 窗口动画不同步」有关。
+- **Prevention:** 四件事必须同时成立，缺一个就还会闪：
+  ① **内容与窗口尺寸解耦，而且 layer 必须已经覆盖展开态**：`ClipboardPanelView` 根视图固定展开态宽度 `ClipboardPanelMetrics.expandedWidth`（821），预览列宽度恒定占位（未展开时 `Color.clear`）；**`NSHostingView` 也必须固定 821 宽，只让高度跟随宿主**（`autoresizingMask = [.height]`）。只让 hosting 跟随窗口宽度是**不够**的：收起态窗口 360 宽，layer 的 backing store 也只有 360 宽，右侧 461pt 预览列压根没被光栅化，窗口生长时仍要靠主线程逐帧补画，主线程一停顿就回到拉伸老路——这正是「改完还偶发闪一下」的残留原因。定宽后预览列在动画起手前就已画完（app 内离屏取样：生长前右侧预览区已有 5406 个前景像素）。超宽部分由窗口自身裁掉，宿主 layer 默认不 masksToBounds。只用 autoresizing、不用约束、不挂 `glass.contentView`，不违反 DEV-024。
+  ② **渲染先于生长**：设完 `previewItem` 后在下一轮 runloop 里 `layoutSubtreeIfNeeded()` + `displayIfNeeded()`，再启动窗口动画（`expandPreview`）。顺序反了就是窗口先动、内容后画。
+  ③ **定宽内容必须用 `overlay(alignment:)` 钉在宿主左上**。`.frame(maxWidth: .infinity, alignment: .topLeading)` 在**子视图比宿主宽**时不会靠左，SwiftUI 会把整块内容**居中**：实测把 821 宽内容放进 360 宽宿主，左右各裁 230pt，列表只剩右半截，必须等窗口长到 821 才恢复正常。正确写法 `Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity).overlay(alignment: .topLeading) { 定宽内容 }`（`ZStack(alignment: .topLeading)` 同样会被居中，实测无效）。
+  ④ 窗口动画**仍用 `animator()`**（0.16s easeOut）。内容固定宽度 + layer 已预渲染后，动画期间零重排、零补画，不会再被拉伸。**不要改成自己开 60Hz 定时器逐帧 `setFrame`**：实测 10 帧共 18ms、单帧最大 2.6ms，视觉与 `animator()` 无差别，却让展开瞬间多占主线程，已回退。
+  ⑤ **两个方向都要像抽屉抽出，靠「把内容钉在不动的那条边」实现**（`pinHosting`）：预览在右 → hosting 钉窗口左边缘（`autoresizingMask = [.height]`，内容局部 0 是列表、右侧 461pt 是预览），窗口向右长；预览在左 → hosting 钉窗口右边缘（`autoresizingMask = [.minXMargin, .height]`，`frame.origin.x = 窗口宽 - 821`，内容局部 461 起是列表、左侧 460pt 是预览），窗口向左长。这样窗口无论朝哪边长，列表在屏幕上都不动，另一边就是把已经画好的预览「抽」出来。
+  **不要图省事让左展开直接瞬时到位**（早期就是这么绕的）：视觉上「啪」一下变宽，用户会当成动画丢了。也不用担心窗口原点移动导致内容错位——只要 hosting 钉对了边，AppKit 的 autoresizing 会逐帧把 `origin.x` 顶回去，列表始终贴在窗口那条不动的边上。
+  切钉法本身不产生跳变：收起态窗口 360 宽，两种钉法下列表都正好铺满窗口，所以 `previewOnLeft` 在收起时可以保持上次的方向、不必回切一次。
+  还有：**圆角裁剪要挪到宿主 layer**（`container.layer.cornerRadius + masksToBounds`），不能留在 821 宽的 SwiftUI 内容上——内容恒定 821 而收起态窗口只有 360，画在内容上的圆角会跑到窗口外面，右边缘变直角。
+- **代价:** hosting 定宽 821 让 backing store 变成窗口的 2.3 倍（2x 屏 821×422 约 5.5MB），面板 dismiss 时随内容树一起释放。窗口生长期间 hosting 每帧 `layout()` 仅 0.05–0.10ms（布局缓存命中；实测 60 帧共 1.38ms、单帧最大 0.09ms），首次插入约 3ms。
+- **验证:** `ZEROFLOW_CLIPBOARD_DEBUG=1` 启动，日志应只有一条 `frame -> ... preview=true ... animated=true`（幂等守卫挡住两条入口重复起手），并跟一条 `preview prerender ...`；收起态应看到完整列表（搜索栏 + 全部行 + 底栏）而不是半截。抽屉方向可在动画中途抓帧核对（`ZEROFLOW_PANEL_SNAPSHOT` 把延时调到 80ms）：右展开中途应是「列表完整在左 + 预览从右边露出一截」，左展开中途应是「预览从左边露出一截 + 列表完整在右」，两边都不该出现拉伸或错位。若又闪了，依次查：根视图是否被改回 `.frame(maxWidth: .infinity)`（内容跟着窗口逐帧重排）、hosting 是否又被改成跟随窗口宽度（预览列没被光栅化）、对齐是否用了 `.frame(alignment:)` 而不是 `overlay(alignment:)`（内容被居中裁切）、`pinHosting` 是否还跟着 `previewSide` 切边。
+
+## DEV-069: 系统 Now Playing 对第三方 app 是空的,「正在播放」必须另配 CoreAudio 出声探测
+
+- **Pitfall:** 灵动岛「正在播放」卡片对 QQ音乐、语音备忘录永远显示「没有正在播放的音乐」,而对 Chrome 却常年显示一个早已不存在的会话。用户报「没什么支持的」,看起来像读取 API 失效,实际是数据源根本不存在。
+- **Cause:** macOS 的 Now Playing 是**单一共享槽位**,只有 app 主动向 `MPNowPlayingInfoCenter` 上报才有数据。实测 macOS 27.2.1:QQ音乐(`com.tencent.QQMusicMac`)和语音备忘录(`com.apple.VoiceMemos`)播放中,`MRMediaRemoteGetNowPlayingClients` 返回**空数组**、`MRMediaRemoteGetNowPlayingApplicationPID` 返回 0、`MRNowPlayingRequest.localNowPlayingItem` 为 nil;与此同时 `localNowPlayingPlayerPath` 仍指向一个 Chrome 的 **paused 僵尸会话**(空闲后不释放,`localPlaybackState` 恒为 2)。即:读不到不是 API 被封,而是这两个 app 压根不上报;僵尸会话还会让「谁是当前播放器」的判断被带偏。
+- **Prevention:** 双源合并,`NowPlayingMonitor.read()`:
+  ① **MediaRemote 优先**:拿到 item 且其 bundleID 出现在出声列表里(或出声列表为空,可能是暂停态)→ 用完整信息(标题/歌手/进度,`canControl = true`)。
+  ② **CoreAudio 兜底**:`kAudioHardwarePropertyProcessObjectList` + `kAudioProcessPropertyIsRunningOutput == 1` 枚举正在出声的进程(macOS 14+ 公开 API,实测能准确抓到 QQ音乐与语音备忘录),用 `NSRunningApplication` 取 bundleID/localizedName 做降级展示,`canControl = false`。
+  ③ **过滤**:`activationPolicy == .prohibited` 的守护进程(audiomxd/CoreSpeech/assistantd 等在列表里但不算 app)、自身 bundleID 全部剔除;已知音乐类 bundle 排在前面,避免浏览器视频抢位。
+  ④ **僵尸会话判定**:media 的 app 不在出声列表而**另有 app 在出声**时,丢弃 media 改用出声方——否则 Chrome 空闲会话会让卡片一直显示 Chrome 的旧内容。
+- **代价:** 降级路径拿不到曲名/歌手/进度,暂停时 CoreAudio 输出归零,卡片要等 `staleLimit`(3 次轮询 ≈6s)才清空,无法显示「已暂停」。
+- **验证:** `ZEROFLOW_NOTCH_DEBUG=1 ZEROFLOW_NOWPLAYING_DEBUG=1` 启动(后者让轮询脱离面板模块独立运行),播放 QQ音乐应看到 `NowPlaying: audio-only app=com.tencent.QQMusicMac ...`;播放 Music.app 应看到 `NowPlaying: media app=com.apple.Music sounding=true`。
+
+## DEV-070: MRMediaRemoteSendCommand 的 C 签名是 2 个参数,写错会在 macOS 27 上崩溃
+
+- **Pitfall:** 灵动岛「正在播放」的上一首/播放/下一首按钮按下去 app 直接崩溃:`NSInvalidArgumentException: -[NSObject mutableCopyWithZone:]: unrecognized selector sent to instance`。
+- **Cause:** 原实现把符号声明成 `@convention(c) (UInt, AnyObject, DispatchQueue, AnyObject?) -> Void`(4 参数),实际签名是 `void MRMediaRemoteSendCommand(MRMediaRemoteCommand cmd, CFDictionaryRef options)`(2 参数)。多余参数在 arm64 上被忽略,于是 `options` 位置收到的是 `MRNowPlayingRequest` **类对象**;框架内部 `MRMediaRemoteResolveCommandOptions` 会对它调 `mutableCopyWithZone:`,直接抛异常。
+- **Prevention:** 按真实签名声明 `@convention(c) (UInt32, CFDictionary?) -> Void`,调用传 `fn(UInt32(command.rawValue), nil)`(实测不再崩溃)。另外**不要用 `controlsAvailable` 决定按钮是否可点**——符号存在不代表目标 app 收得到命令:只有上报 Now Playing 的 app 才是 command handler,CoreAudio 兜底出来的 QQ音乐/语音备忘录必须靠 `NowPlayingInfo.control` 置灰。
+
+## DEV-071: 不上报 Now Playing 的 app 只能用系统媒体键控制,而且必须是 now playing owner
+
+- **Pitfall:** QQ音乐不上报 Now Playing,`MRMediaRemoteSendCommand` 对它无效。逐条试下来:媒体键 `NX_KEYTYPE_PLAY` 第一次也无效,但换了个时机再试却成功了——说明不是通道不通,是**命令被别的 app 吃掉了**。
+- **Cause:** macOS 的媒体键不走 CGEventTap,而是走 MediaRemote 的 command 分发,只发给**当前 now playing owner**。实测当时 `localNowPlayingPlayerPath` 指向一个 Chrome 的空闲会话(Chrome 早就不播了但不释放),所有媒体键都被 Chrome 收走;后来通过一次激活把 owner 切到 QQ音乐后,三个键立刻全部生效(PLAY 暂停→播放、NEXT 切歌、PREVIOUS 切回,曲名用 AX 读出来逐次核对过)。另外这些 app 的播放控制栏在 AX 里是自绘 `AXUnknown`(`AXPress` 返回 `actionUnsupported -25206`),菜单栏「播放控制」菜单虽然有 `AXPress`,但**后台 app 的菜单栏项不响应**(`activate` 之后才行),所以坐标点击是唯一能"点"到它的方式——代价是必须抢前台,体验不可接受。
+- **Prevention:** 控制通道做成三态 `ControlChannel`:
+  ① `.mediaRemote` —— 上报了 Now Playing,发 `MRMediaRemoteSendCommand`;
+  ② `.mediaKey` —— 不上报,但 `localNowPlayingPlayerPath` 的 bundleID 与目标 app 一致,发 `NX_KEYTYPE_PLAY/NEXT/PREVIOUS`(16/17/18,`NSEvent.otherEvent(.systemDefined, subtype: 8, data1: key<<16 | 0xa<<8)`,down/up 各发一次);
+  ③ `.none` —— 既不上报也不是 owner,**必须置灰**:此时发媒体键会打到别的 app 身上,是最坏的结果。
+  曲名同理别依赖窗口标题(窗口一关就没),读 AX 播放控制栏的 `AXDescription`:`歌曲名：虚拟 - 歌手名：陈粒`,按 ` - 歌手名：` 切分即可;`AXUIElementSetMessagingTimeout(app, 1.0)` 防止 app 无响应时把轮询队列卡 6s。
+- **未解:** 媒体键是 toggle 语义且全局,Zeroflow 无法指定目标;owner 一旦被别人抢走,按钮就会置灰。语音备忘录等原生 app 的 AX 结构尚未验证(可能有真正的 `AXPress` 按钮,能走更稳的通道)。
+
+## DEV-072: 暂停即「消失」——CoreAudio 出声探测对暂停态是瞎的
+
+- **Pitfall:** 从卡片上点暂停,卡片立刻变成「没有正在播放的音乐」——三个按钮跟着一起没了,用户再也点不回去,只能去 app 里手动恢复。
+- **Cause:** `kAudioProcessPropertyIsRunningOutput` 在暂停的瞬间就变成 0,`AudioActivityMonitor.activeApps()` 返回空;而 QQ音乐/语音备忘录这类不上报 Now Playing 的 app 在 `MRNowPlayingRequest.localNowPlayingItem` 里本来就是 nil。于是 `read()` 两个源同时为空 → 返回 nil → 轮询的 `staleLimit`(3 次 ≈6s)把 `nowPlaying` 清空。注意**暂停时 `localNowPlayingPlayerPath` 仍然指向该 app**(实测 `owner=com.tencent.QQMusicMac`),这正是键盘上的播放键能把暂停的 app 唤醒的原因,也是唯一还活着的线索。
+- **Prevention:** `NowPlayingMonitor` 里维护 `lastAudioApp`(pid/bundleID/name),两条兜底:
+  ① 出声列表空了但记忆里的 app 还在跑、且 owner 仍是它 → 输出 `isPlaying = false` 的 `NowPlayingInfo`,control 照旧按 owner 判定(实测暂停后仍是 `.mediaKey`,按钮可点);
+  ② 进程刚启动 / 面板没开过、没有记忆时,直接按 `localNowPlayingPlayerPath` 的 bundleID 找运行中的 app 补出「已暂停」——效果与系统控制中心一致。
+  反向约束:owner 已换成别的 app 时**不要**硬留(说明别处接管了播放),清掉记忆返回 nil。
+- **验证:** 播放 QQ音乐 → 点卡片中间按钮暂停 → 卡片应显示「● 已暂停」+ 曲名仍在 + 频谱压成基线 + 按钮仍可点;再点一次应立刻恢复(`NowPlaying: sent togglePlay via mediaKey` 后紧跟 `audio-only ... owner=true`)。日志里暂停态会打 `NowPlaying: paused app=... control=mediaKey` 或 `paused(owner) app=...`。
+
+## DEV-073: 卡片里的「真实频谱」只能走 ScreenCaptureKit,而且必须自适应归一化
+
+- **Pitfall:** 想给「正在播放」卡片加律动效果,三种看起来都能拿到音频的路,只有一条真的出声:CoreAudio process tap 建得成功、IOProc 也在跑,但读出来全是静音;ScreenCaptureKit 从 CLI 直接跑会报 `-3801 用户拒绝`;而算出来的 FFT 幅值又是绝对量纲,直接线性映射会全满格或全灭。
+- **Cause:** ① **process tap**(`CATapDescription(stereoMixdownOfProcesses:)` + `AudioHardwareCreateProcessTap` + 聚合设备)需要单独的音频捕获授权,**不弹窗、静默失败**:`status=0`、`tapID` 有值、IOProc 触发上百次,但 `maxAbs = 0.0`。② **ScreenCaptureKit 的音频轨**复用「屏幕录制」授权,容器 app 已有该授权,所以只有经 LaunchServices 启动(`open -a`)的 app 能跑通,shell 里 exec 二进制会因 TCC 归属不同被拒。③ FFT 幅值随音量/设备差几十 dB,固定阈值必然失真。
+- **Prevention:** `AudioSpectrumMonitor` 的做法:
+  ① 数据源:`SCContentFilter(display:excludingWindows:)` + `config.capturesAudio = true` + `excludesCurrentProcessAudio = true`(防自激),视频轨压到 16×16@1fps(SCK 不允许只开音频)。
+  ② 取样本用 `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer` 拿第一声道,再按 `mNumberChannels` 跳采——**不要**假设 planar 或 interleaved,直接 `CMBlockBufferGetDataPointer` 在非连续块上会失败。
+  ③ FFT:1024 点 + Hann 窗 + `vDSP_fft_zrip` + `vDSP_zvabs`,按 `pow(half, b/16)` 对数分桶取均值。
+  ④ 归一化:**滚动峰值当参考顶**(立刻跟随更高峰、每帧最多回落 0.4dB),显示范围 `参考顶 - 42dB`,再叠 **9dB 高频补偿**(音乐能量集中在低频,不补偿右半边永远平着);数字静音(`topDb <= -100`)直接衰减到 0,否则参考顶会一路掉、把底噪抬成满格。
+  ⑤ 包络:上升直接跟随、下落 `0.75/0.25` 混合;发布限 30fps(`CFAbsoluteTimeGetCurrent` 卡时间戳),FFT 在音频回调队列算完再回主线程赋值。
+  ⑥ SwiftUI 侧 30fps 重绘**必须挂在卡片宿主**(`MusicCardHost` 同时观察 `NowPlayingMonitor` 和 `AudioSpectrumMonitor`),挂到顶层会把日历月网格一起重算(同 DEV-050)。
+- **代价:** 频谱只在音乐模块显示期间跑(`setActive` 与模块联动),面板收起即停流;首次起流有几百毫秒延迟,刚弹出时是平条。
+- **验证:** `defaults write com.zeroflow.app notchAutoShow -bool true` + `notchModule=music` + `notchSnapshot=/tmp/x.png` 后 `open -a`,播放音乐抓图应看到 16 段高低错落的橙色条;暂停后应压成一条基线(不透明度 0.3)。日志出现 `Spectrum: 已启动` 即起流成功,失败会打 `Spectrum: 启动失败 ...`(多半是屏幕录制授权)。
+
+## DEV-074: 触控板「轻点即点击」下 `ButtonStyle.isPressed` 一闪而过,按下动画等于没有
+
+- **Pitfall:** 灵动岛播放控制按钮,用触控板轻点(点按无需按下)能触发动作,但完全看不到按下反馈;只有真的按住鼠标才看得到缩放动画。用户报「功能没问题,就是点了没感觉」。
+- **Cause:** 轻点在同一帧里先后投递 mouseDown/mouseUp,`configuration.isPressed` 在 SwiftUI 合并状态更新时直接 true→false,`spring(response: 0.18)` 一帧都没跑就被打断,视觉上等于没变。
+- **Prevention:** 按下态要有**最短可见时长**:动作仍交给 `Button`(命中/禁用/`.help` 都不用手写),视觉用 `simultaneousGesture(DragGesture(minimumDistance: 0))` 的 `onChanged` 点亮、`onEnded` 排一个 `asyncAfter(0.12)` 再熄灭。这样无论 down/up 多近,至少渲染出一次按下→回弹。
+- **验证:** 轻点(不按下)中间按钮,应看到缩小 + 淡底再弹回;把 `minPressDuration` 调到 0 可复现「点了没反应」。
+
+## DEV-075: 出声探测 ≠ 在播放,而且 helper 进程的 bundleID 与媒体会话对不上
+
+- **Pitfall:** ① 从卡片暂停 QQ音乐后,中间按钮的图标一直是「暂停」(说明它以为还在播),再点也没法回到播放态;② 暂停 QQ音乐后去播浏览器视频,卡片仍然显示 QQ音乐的图标/曲名,但三个按钮实际控的是浏览器。
+- **Cause:** ① `kAudioProcessPropertyIsRunningOutput` 在暂停后**不一定归零**(app 仍占着输出流),`read()` 的兜底分支又写死 `isPlaying = true`,于是永远判成播放中,永远走不到「已暂停」兜底(DEV-072 那条只在流真的关掉时生效)。② 音频输出常跑在 helper 进程上(Chrome 的音频服务是 `com.google.Chrome.helper`),媒体会话却记在宿主 bundle(`com.google.Chrome`):`media.appBundleID` 与出声列表精确比对必然失败 → 正在播视频的 Chrome 被判成「僵尸会话」丢掉;退回出声列表后又按 `mediaRank` 把已知音乐 app 排第一,占着流的 QQ音乐继续压过 Chrome。而媒体键按「实际在播的会话」路由,于是出现「卡片显示 QQ音乐、按钮控的是浏览器」。
+- **Prevention:**
+  ① **播放态直接由「有没有声音」驱动,不要轮询去猜**:`AudioSpectrumMonitor` 暴露 `@Published isAudible`(系统混音超过 `silenceDb + 10` 算有声,带 0.35s 保持防淡出闪断),`NowPlayingMonitor` 在 init 里用 Combine 订阅它——电平一落平就地把 `nowPlaying.isPlaying` 翻成 false,一有声就翻回 true,**不经过 2s 轮询**。`read()` 只用 `audible` 给兜底来源赋初值,`audible == nil`(没在捕获 = 不知道)时才退回 `true`,否则没屏幕录制权限会一律显示「已暂停」。
+  ② **别做乐观翻转**:早先版本在 `send(.togglePlay)` 后本地翻状态再挂 4s 窗口,结果和轮询互相打架(用户报「经常出错」)。电平信号本身就是真相且 0.35s 内到位,直接以它为准,少一层猜测就少一类 bug。**并且轮询结果落地时必须按当前电平再校一次**(`publish()` 里做),否则后台队列里读到的旧值会把 `applyAudible` 刚翻好的状态盖回去——症状是「点了播放图标闪一下又变回暂停」。
+  ③ **静音时要有人推进状态**:SCK 在完全静音时可能不再投递音频 buffer,`analyze()` 不跑,`isAudible` 就永远停在 true(实测停了 4.5s 才被别的声音事件纠正)。捕获期间挂一个 10Hz 主线程计时器重算 `lastAudibleFrame` 的过期,状态才能自己落回暂停。
+  ④ **出声进程不一定能查到 app**:Chrome 的音频 helper 没在 LaunchServices 注册,`NSRunningApplication(processIdentifier:)` 直接返回 **nil**(实测 lsBundle=nil、pathBundle=com.google.Chrome.helper),旧代码 `guard let raw = ... else { continue }` 把整条记录丢掉,症状是「明明有声音,actives 是空的」→ 只能退回 owner 兜底、判成暂停。改成 `proc_pidpath` 从可执行路径取最内层 `.app` 的 bundleID,再交给 `hostApp` 归并到宿主。
+  ⑤ **由静变响要立刻补查**:`applyAudible(true)` 顺带 `tick()`(0.5s 限流),否则「切到浏览器视频」要等下一个 2s 轮询才换卡片,用户体感是「切换有点慢」。
+  ⑥ **bundle 比对改成家族匹配**:`sameApp(a,b)` = 相等或互为 `.` 前缀(`com.google.Chrome.helper` ↔ `com.google.Chrome`);`AudioActivityMonitor` 把 helper 归并到宿主 app(取最长前缀的 `.regular` 进程),用宿主 pid 读 AX/窗口标题,并按 bundleID 去重。守护进程过滤也从「要求非 `.prohibited`」改成「归并后仍 `.prohibited` 才丢」——helper 的 `activationPolicy` 本身可能就是 `.prohibited`,旧写法会把它们一起过滤掉。
+  ⑦ **WebKit 宿主按名字认**:QQ音乐是 WebKit 播放器,音频可能跑在 `com.apple.WebKit.GPU` 上,bundle 前缀归并不出来,只能靠进程名「<宿主> Graphics and Media」前缀匹配宿主 app。
+  ⑧ **owner 优先排序**:`activeApps(owner:)` 把 `localNowPlayingPlayerPath` 指向的 app 排最前,`mediaRank` 只当同级 tiebreaker。
+  ⑨ **控制按钮别只认 owner**:owner 经常被别的 app 的残留会话占着(浏览器空闲不释放),这时只要目标是**唯一在出声的 app**,媒体键仍会按「有声的会话」路由过去,`control` 用 `isOwner || actives.count == 1` 判 `.mediaKey`,否则 QQ音乐在播也会被置灰成摆设(用户实测反馈)。
+  ⑩ **「出声列表空」不等于暂停**:空列表时用 `audible` 区分——有声就按 owner 展示成在播,没声才判暂停(早先版本无条件判暂停,有声时会被轮询反复打回「已暂停」)。
+- **代价:** 系统音量调到 0 / 输出静音时会被判成「已暂停」;媒体会话为 nil、owner 是陈旧会话、且出声探测也漏掉进程时,仍分不清谁在响。
+- **验证:** `defaults write com.zeroflow.app notchDebug -bool true` 后复现:日志里 `actives=[...]` 应随播放/暂停出现和消失(Chrome 播放时应是 `com.google.Chrome`);点暂停 → `audible=false 当前=.../true` 紧跟一次翻转,图标 0.5s 内变播放;播浏览器视频 → 立刻(不等 2s)出现 `media app=com.google.Chrome sounding=true` 或 `audio-only app=com.google.Chrome`。命令行可复现出声探测:`afplay /System/Library/Sounds/Submarine.aiff` 期间跑 CoreAudio 枚举应看到该 pid 的 `runningOutput=1`。
+- **代价:** 系统音量调到 0 / 输出静音时会被判成「已暂停」;媒体会话为 nil 且 owner 是陈旧会话时,仍分不清两个同时「占着流」的 app 谁在响。
+- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`(或 `ZEROFLOW_NOTCH_DEBUG=1`)后复现:播放 QQ音乐 → 卡片 `audio-only ... silent=false`;点暂停 → 图标立刻变播放,2s 后日志 `audio-only ... silent=true` 且状态保持「已暂停」;再播浏览器视频 → 日志应为 `media app=com.google.Chrome sounding=true`(或 `audio-only app=com.google.Chrome`),卡片换成浏览器图标与页面标题。
+
+## DEV-076: 两个 app 都暂停时,卡片会跟着「谁抢到媒体会话」乱跳
+
+- **Pitfall:** QQ音乐和浏览器都暂停时,把浏览器切到前台(或它加载了视频但没播),卡片就从 QQ音乐跳到浏览器;反向(切回 QQ音乐窗口)却不跳。用户要的是:只有真的开始播才换卡片。
+- **Cause:** `read()` 里有一条 `actives.isEmpty → return media`——没人在出声时直接用系统 Now Playing 的会话。但媒体会话是**单槽**,浏览器一加载视频就把槽抢过去(哪怕没播),于是卡片跟着它跑。而 QQ音乐不上报,永远抢不回这个槽。
+- **Prevention:** 在 `read()` 最前面加一条「锁」:没声音(`audible != true`)且出声列表为空时,只要 `lastAudioApp` 还在跑就直接返回它,不看 `media`、不看 owner。真的出声时(`audible == true`)这条自动失效,卡片才换人——正好对上「点了播放才切」。同时暂停态的 `control` 一律给 `.mediaKey`,否则被锁住的那张卡片按钮是灰的,用户点不回去。
+- **代价:** 静音播放(系统音量 0、视频本身静音)时卡片不会切过去——没有声音就没有依据。
+
+## DEV-077: 暂停态的图标要跟手,数字静音必须走快速通道
+
+- **Pitfall:** 点暂停后图标要等 0.35s 的静音保持期才翻成「播放」,而按钮的按下动画(0.12s + 弹簧)早跑完了,观感是「动画结束了图标才变」;播放方向却是按下当帧就翻,两个方向不对称。
+- **Cause:** `isAudible` 只有「0.35s 没声音」这一个判据,而暂停是**立刻**发生的,0.35s 纯粹是白等。保持期本来是为了挡曲间空隙/淡出。
+- **Prevention:** 加第二条判据:连续 3 帧(≈100ms)出现**数字静音**(`topDb <= silenceDb`,只有真正停掉输出才有)就直接判 `audible = false`,不走保持期;保持期只兜「有底噪但很轻」的模糊情况。两条判据合成 `audibleNow`,回调路径和 10Hz 兜底计时器共用。
+- **验证:** `afplay /System/Library/Sounds/Submarine.aiff` 结束时日志里的 `audible=false` 应与结束时刻相差 <100ms(实测 0~100ms),图标在按下动画还没结束时就翻过去。
+
+## DEV-078: 多个 app 同时出声时,卡片要显示「最后被操作的那个 app」,而「被操作」有五种形态
+
+- **Pitfall:** 先在浏览器播视频、再打开 QQ音乐播歌,两个音频同时在放。媒体键实际控的是 QQ音乐(最后操作的那个),但卡片显示的却是浏览器的信息——「能控的和显示的」对不上。改成「最近**开始播**的那个」之后,方向反过来坏:浏览器→QQ 修好了,QQ→浏览器又变慢/不切。
+- **Cause:** ① 展示顺序按 `mediaRank` + `localNowPlayingPlayerPath` 的 owner 排:Chrome 占着会话槽,永远压过 QQ音乐;`media` 分支又会直接返回上报方,所以 QQ音乐一开局就输。② 元数据轮询 2s 一次,新出现的出声方要等下一个周期才被看见。③ 只用「进了出声列表」判操作是不够的:app 暂停后**未必**离开出声列表(AVAudioPlayer 的 `pause()` 实测 `IsRunningOutput` 仍是 1),而浏览器换一条视频时出声列表、owner、playbackRate **三者全都不变**——这几种「刚被操作」在出声列表上完全看不见。
+- **Prevention:**
+  ① **展示 = 出声列表里最后被操作的那个**(`pickActive` + `operatedAt` 时间戳取最大)。「被操作」由五个信号合成,缺一个就会有一个方向切不过去:`trackOperations()`
+  - 新进出声列表(开始播;暂停后进程消失的 app 走这条,QQ音乐就是);
+  - 系统会话 owner 换人(浏览器抢槽/开始播都走这条,不用等出声列表变);
+  - 上报会话 `playbackRate` 由停转播(同一个 app 自己暂停再播,owner 不变);
+  - 混音由静变响(`applyAudible` 里 `queue.async { sawSilence = true }`,队列侧消费,单候选直接判、多候选退而信 owner);
+  - 上报内容换了(曲名变 / 进度跳回 0)——槽和输出流都没动静时只有这里看得出来。
+  `media` 只在「它的 app 就是这个人」时才用(信息更全),否则用 CoreAudio 兜底。
+  ② **出声列表单独跑高频哨兵**:`activeApps()` 只是几个 CoreAudio 属性读(微秒级),而元数据(AX + CGWindowList)很贵。拆成 0.3s 的 `checkActivity()`,比的是 `bundleID 集合 + SessionSnapshot(owner/playing/title)`,任一变化就 `tick()`,切 app 从「最多 2s」变成「最多 0.3s」。`SessionSnapshot` 的 owner 要**独立于 item 取**:会话可能没有曲名(浏览器加载了页面但没播),那时 owner 照样有值,不能因为读不到 item 就把 owner 一起丢。
+  ③ **按钮不再按 owner 置灰**:既然展示的就是最后操作的那个 app,媒体键也路由给它,`control` 直接给 `.mediaKey`;置灰只会让用户点不动自己能控的东西。
+- **代价:** 「同时只控一个」做不到——`MRMediaRemoteSendCommandToApp` 这类按 app 发命令的接口需要 `com.apple.mediaremote.send-commands` 私有授权,没有授权时命令会被重定向到当前播放器(实测符号存在但无效),所以没法先把别的 app 暂停再操作目标。另一个代价见 DEV-079(多个 app 同时占着输出流时,声音归属无公开 API)。
+- **验证:** 用两个可控假播放器(`/tmp/zfmock`,AVAudioPlayer 循环播 440Hz,**不**上报 Now Playing,行为等同 QQ音乐)跑固定序列,`ZEROFLOW_NOWPLAYING_DEBUG=1` 启动看日志:① 只播 A → `audio-only app=com.example.zfmocka`;② 再播 B → 1.5s 内变 `com.example.zfmockb`(这就是用户要的「显示最后操作的那个」);③ 暂停 B 再播 B → 仍为 B。浏览器侧同理(先播浏览器视频、再播 QQ音乐,日志应出现 `audio-only app=com.tencent.QQMusicMac ... n=2`)。
+
+## DEV-079: 多个 app 同时占着输出流时,「谁在出声」没有公开 API 可归属
+
+- **Pitfall:** 两个 app 都播过、都还占着输出流(暂停但 `IsRunningOutput` 仍为 1),混音从静变响时,代码知道「有人开始播了」,但**不知道是哪个**。这时只能退而信 now playing owner(不上报的 app 又没有 owner),猜错就会出现「卡片显示 A,实际响的是 B」。
+- **Cause:** `kAudioProcessPropertyIsRunningOutput` 是布尔值,CoreAudio 的 process object 只暴露 PID / bundleID / IsRunning / IsRunningInput / IsRunningOutput,**没有**每进程电平或时间戳;系统混音(`AudioSpectrumMonitor`)拿到的是所有 app 的叠加,天然无法归属。
+- **Prevention:** 目前只在「能归属」的情况下记账(见 DEV-078 的五个信号),归属不了就不改展示,避免瞎猜导致卡片乱跳。真要彻底解决得上 **process tap**(`AudioHardwareCreateProcessTap`,macOS 14.2+)给每个候选进程单独取电平,代价是要为每个进程建 aggregate device + IOProc,属于另一个量级的改动。
+- **验证:** 用 `/tmp/zfmock` 的两个假播放器:`play a` → `play b` → `pause a` → `pause b`(此时两个都占着流、混音静)→ `play a`,卡片会停在最后操作的 B 上而不是 A。这是已知限制,不是回归。
+
+## DEV-080: 僵尸 now playing 会话不能当成「刚被操作」,否则浏览器永远压着真正在响的 app
+
+- **Pitfall:** 给 `operatedAt` 加「会话 owner 换人 = 被操作」这个信号之后,浏览器彻底主导:不管最后操作的是谁,卡片都显示浏览器,点播放也确实播浏览器。
+- **Cause:** `localNowPlayingPlayerPath` 只表示「谁占着会话槽」,**不代表它在播**。实测 Chrome 空闲后仍长期占着槽,而且槽里连曲名都没有(`owner=com.google.Chrome title=-`)。按「owner 变了就算被操作」记账,等于每次混音从静变响、每次启动首读,都把一次操作白送给这个僵尸;再加上多候选时「退而信 owner」的兜底,它还能在每次静→响时被反复加分。
+- **Prevention:** 三条一起改。① owner 换人必须**同时**满足「会话真的在播(`playbackRate != 0`)+ 会话的 bundleID 与 owner 一致 + owner 在出声列表里」才记账,空槽/僵尸一律不认;② 混音由静变响时**只有单一候选**才记账,多候选宁可不动(见 DEV-079),不要退而信 owner;③ 诊断日志打出每个候选「距今多久被记成刚被操作」(`pick=... [bid=2.3s ...]`),下次再出现「为什么显示它」直接看这行。
+- **验证:** 浏览器空闲占着槽 + QQ音乐在播时,`NowPlaying: pick=com.tencent.QQMusicMac [com.google.Chrome=从未 ...]`,卡片应显示 QQ音乐。
+- **仍存在的限制(见 DEV-081):** 显示对了,但点按钮**不一定控得到它**。
+
+## DEV-081: 媒体键无法定向,卡片显示和按钮实际控制对象可能不是同一个 app
+
+- **Pitfall:** 卡片显示 QQ音乐,点播放却把浏览器里的视频播起来了。
+- **Cause:** 播放控制只有一条通道——系统媒体键(`NX_KEYTYPE_PLAY`),它由 MediaRemote 分发给**当前 now playing owner**,调用方无法指定目标。实测排除的替代路径:① `MRMediaRemoteSendCommandToApp(cmd, nil, bundleID, nil)` 传 bundleID 直接 SIGSEGV(第 3 参不是 CFString,真实签名要 playerPath/私有授权);② `MRMediaRemoteSendCommand` 对不上报 Now Playing 的 app 无效;③ QQ音乐的播放控制栏在 AX 里是自绘 `AXUnknown`(`desc="播放"`、有精确 frame、但 `actions=[]`),按不动;④ 就算按 frame 用 `CGEvent.postToPid` 点,QQ 后台时 AX 树连窗口都不暴露(`AXWindows` 为 0,只有它自己在前台才可见),拿不到坐标。⑤ 给 owner 发 `stop` 也踢不掉槽(实测 owner 不变)。
+- **Prevention:** 目前**不做特殊处理**,只在 `send()` 里打一行诊断:`send togglePlay card=X owner=Y ⚠️不一致`。**别试图用「显示=按钮能控的那个」来兜**:到底谁会被控,取决于系统按「谁在播/谁最后被操作」做的路由,而我们既拿不到可靠的路由结果(见 DEV-082),合成的媒体键在测试环境里也对不上(打一次 key,Chrome 暂停的视频没恢复、会话方的 mock 也没暂停)——按它做显示规则只会把浏览器重新推上卡片。所以显示仍按「最后被操作的出声 app」,控制照发媒体键。
+- **代价:** 只要浏览器(或任何上报 Now Playing 的 app)占着会话槽,媒体键就可能先到它手上;想让 QQ音乐被控,只能等它自己成为路由目标。真正自洽的替代方案只有「显示最后操作的 app + 不可控时置灰」,需要产品上接受按钮点不动。
+## DEV-082: 进程内读 MediaRemote 会**冻结**在首次读取,长跑进程永远看不到 owner 变化
+
+- **Pitfall:** app 启动时浏览器正占着会话槽,之后浏览器关了、QQ音乐开始播,卡片却一直按「owner 是浏览器」来判——显示浏览器、控制也发给了浏览器。重启 app 立刻正常。看起来像「显示逻辑又错了」,其实是读数本身是死的。
+- **Cause:** `MRNowPlayingRequest` 的类属性(`localNowPlayingPlayerPath` / `localNowPlayingItem`)在**每个进程里只求值一次**就缓存住。实测:让一个上报型 app 成为 owner 再把它杀掉,长跑 20s 的探针在它退出 12s 后仍然报它的 bundleID,而同一时刻新起的进程立刻报 `com.google.Chrome`。注册 `MRMediaRemoteRegisterForNowPlayingNotifications` 也没用。C 接口在这版 macOS 上全被阉:`MRMediaRemoteGetNowPlayingApplicationPID` 恒返回 0、`MRMediaRemoteGetApplicationDisplayID` 恒 nil、`MRMediaRemoteGetLocalNowPlayingPlayerPath` 的 block 根本不回调。
+- **Prevention:** 会话改走**子进程**读(`osascript -l JavaScript`,`readNowPlaying()` 优先 `readViaSubprocess()`),进程内只作兜底。实测一次 ~77ms(含进程启动),跑在轮询队列上,2s 一次约 1% CPU,换来的是**每次都是新鲜值**(曲名/歌手/bundleID/playbackRate 全对)。同理,0.3s 哨兵只比出声集合,不再比会话快照(比它没有意义)。
+- **验证:** 让上报型 app 成为 owner 再杀掉,新起的进程应报 `com.google.Chrome`;app 不重启也应跟着变(`media(owner)` 日志里的 bundleID 会变)。
+
+## DEV-083: 主线程做 AX 会卡死——AX 注册必须下后台队列 + 失败缓存 + 过滤 XPC 服务
+
+- **Pitfall:** 用一会儿后打开设置页整机 beachball(几十秒到永久)。关掉「Dock 单击最小化」照旧,说明不是某一个功能开关的问题。三次 `sample` 主线程 100% 停在同一处。
+- **Cause:** 两条独立的坑,共同点是「AX 是同步 IPC,不该出现在主线程/事件线程上」。
+  ① **主线程全量重建 AX 观察者**:`WindowActivityTracker.observeLifecycle()` 在 `didBecomeActive` 上调 `rebuildObservers()`,遍历 `NSWorkspace.runningApplications` 逐个 `AXObserverAddNotification`。打开设置 = `NSApp.activate` = 一次激活,于是主线程被串行拖住。实测 QQ音乐那批 `com.apple.WebKit.Networking/GPU/WebContent` 子进程(`type=UIElement`、sandboxed、无 bundleURL)**根本不能当 AX 客户端**,每个都要等满消息超时再返回 `kAXErrorCannotComplete(-25204)`,日志里精确 1.5s/个,12 个 ≈ 18s;而且失败后 `axObservers[pid]` 没写进去,**每次激活都重付一遍**,所以「用得越久越卡」(播放器开得越久 WebKit 子进程越多)。
+  ② **event tap 线程解 AX 打自家窗口 = 永久死锁**:`DockClickMinimizer.appFromHitTest` 在 CGEventTap 线程上 `AXUIElementCopyElementAtPosition`。命中点落在自家 SwiftUI 窗口时,HIServices 走**进程内本地实现**(不跨进程),一路进 AppKit `accessibilityHitTest:` → SwiftUI `ViewGraphRootValueUpdater.updateGraph` → `_MovableLockSyncMain` 等主线程;此时它持着 HIServices 全局 AX 锁,而主线程正在 `AXObserverAddNotification` 里等同一把锁(`_os_nospin_lock_lock_slow` → `__ulock_wait`)。ABBA 死锁,栈里同时能看到两个 ⌘⇥ 线程在 `WindowList.enumerate → AXWindow.focusedWindowID` 排这把锁。
+- **Prevention:** ① `rebuildObservers`/`addObserver` 全部丢到 `axQueue`(串行后台队列),主线程只留 `CFRunLoopAddSource(CFRunLoopGetMain(), ...)`;`registerObserver` 前用 `isAXClientCandidate` 过滤(排除 `com.apple.WebKit*`、`.xpc/` 路径、无 bundleURL、`.prohibited`);注册失败的 pid 记进 `failedPids` 不再重试(pid 退出/复用即清);`AXUIElementSetMessagingTimeout(element, 0.3)` 给单次调用封顶。② `DockClickMinimizer.appFromDockItem` 先判命中点是否落在自家窗口里(`isOwnWindowPoint`,用 `CGWindowListCopyWindowInfo` 而不是 `NSApp.windows`——事件线程碰 AppKit 窗口数组不安全),是就直接放行不解 AX;`appFromHitTest` 同样设 0.3s 超时。
+- **验证:** `ZEROFLOW_OPEN_SETTINGS=1` 启动后 `sample` 主线程应停在 `_DPSNextEvent`(空闲),日志里失败注册只出现一次、每个 ≤0.3s、且看不到 WebKit 子进程的 pid。修复前同场景主线程停在 `rebuildObservers → _AXObserverAddNotification`。
+
+## DEV-084: 卡片显示对象必须「粘住」当前播放器,暂停不能换人
+
+- **Pitfall:** 两个声源同时在放(A 早开、B 后开,卡片显示 B)。点暂停把 B 停掉后,卡片切到还在响的 A;再点暂停,本该停掉 A,实际却是 **B 被重新拉起来**,两个声源一起在播。
+- **Cause:** ① B 暂停后离开 CoreAudio 出声列表,`trackOperations` 里 `operatedAt = operatedAt.filter { live.contains($0.key) }` 把 B 的「刚被操作」记录删掉,`pickActive` 于是退到还在响的 A;② 但媒体键(`NX_KEYTYPE_PLAY`)由 MediaRemote 分发给**最后开播的那个 app**,也就是 B,无法定向(DEV-081)。于是「卡片上是 A、按下去动的是 B」;③ B 被媒体键拉起后重新进出声列表,`operatedAt[B] = now`,卡片又跳回 B——三步串成「两个都在播」。
+- **Prevention:** 把「展示对象」从「出声列表里 operatedAt 最大的那个」改成**粘性状态** `current`(`updateCurrent`):只有「某个 app 的 operatedAt 比 `current.at` 更晚」或「它退出了」才换人,暂停、离开出声列表一律不换。卡片停在暂停态的那个 app 上,按钮点的就是它,系统路由的也是它。`pickActive`/`idleInfo`/`lastAudioApp` 因此整体删除——`audioOnlyInfo` 直接按 `current` 出卡,app 重启(pid 变了)时按 bundleID 重新认 pid。面板关着时不轮询,`operatedAt` 收不到信号——重开时靠 `previousActives` 仍是旧集合这一点认出「关着期间有人开播」(信号 1),**不要**在重开时按「谁在响」重挑(那会让「暂停当前播放器、切个窗口」直接跳卡,见 DEV-087)。
+- **代价:** 当前播放器暂停、别的 app 还在响时,卡片显示的是「已暂停」而不是那个在响的 app(用户要的就是这个:状态只存最新那个播放器)。想暂停另一个 app 只能去它自己的界面。
+- **验证:** 两个可控假播放器:`play a` → `play b` → 点卡片暂停 → 卡片仍显示 B(已暂停)、A 继续响 → 再点播放 → 只把 B 拉起来,不会出现「两个都在播」。日志里 `NowPlaying: current=...` 只在「新开播」时变。
+
+## DEV-085: 播放/暂停图标要「点击即翻 + 律动验证」,不能只信 playbackRate
+
+- **Pitfall:** 卡片中间的播放/暂停图标时不时显示反的:点了暂停图标不动、或点了播放又自己变回播放键;律动柱子还在跳,图标却显示「播放」。
+- **Cause:** ① 上报型 app(`control == .mediaRemote`)的 `isPlaying` 只认 2s 一次子进程读到的 `playbackRate`,`applyAudible`/`publish` 里都有 `control != .mediaRemote` 的短路——电平再快也不参与判定,字段缺失时还默认「在播」;② 不上报的 app 的 `isPlaying` 直接等于全局混音 `audible`,别的 app 在响时它明明是暂停也显示「在播」;③ 频谱柱子在 `!isPlaying` 时只把透明度降到 30%,柱子照样跟着全局混音跳,和图标自相矛盾。
+- **Prevention:** ① 播放态收敛到 `deriveIsPlaying` 一处:有声音且当前 app 还在出声列表里 = 在播,没声音 = 暂停;唯一例外是「上报型 app 仍在输出流里且自称在播」——那是系统音量 0/输出静音,不能判暂停(DEV-075 的已知代价);没在捕获或出声列表还没认出来时退回上报值。② `send(.togglePlay)` 先 `beginPendingToggle` 立刻翻图标,开一个 1.6s 的待确认窗口:窗口内 `applyAudible`/`publish` 不许覆盖,一旦真实信号与意图一致就提前收窗,超时还没对上才认命改回真实值;发不出去(符号缺失 / `.none`)时不翻。③ 发送后补查改成 0.2/0.6/1.2s 三次(`inFlight` 挡重叠),不再只查一次 0.5s。④ `spectrumStrip` 在 `!isPlaying` 时把 16 段压成基线,律动与图标永远一致。
+- **代价:** 系统音量 0 时「在播」只能靠上报值维持,不上报的 app 会被判成暂停;暂停后仍占着输出流的 app(浏览器)在 `audible` 为 true 时仍可能被当成在播(DEV-079 无解)。
+- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`,点暂停 → 图标当帧变播放键、日志出现 `待确认 <bid> → 暂停`,随后要么 `current` 侧电平翻转提前收窗,要么 1.6s 后 `待确认超时 → 真实值 false`;律动柱子在暂停瞬间压平。
+
+## DEV-086: 「这个 app 停了没有」判不准——只能按 app 单独抓音频
+
+- **Pitfall:** 多个声源同时响时,把最新那个声源暂停,卡片图标和律动都不停(还在跳);律动看起来跟图标矛盾。上一版(DEV-084/085)用「混音有声 + 它在出声列表里 = 在播」推,一样停不下来。
+- **Cause:** 三条判据全都不可靠:① `kAudioProcessPropertyIsRunningOutput` 是布尔值,暂停后**不一定归零**(浏览器/AVAudioPlayer 暂停仍占着输出流,DEV-075);② 系统混音是所有 app 的叠加,别的声源还在响时「有声」永远为真,无法归属到具体 app(DEV-079);③ `playbackRate` 只有上报型 app 有,而且 2s 才更新一次。三者叠起来,「卡片上这个 app 停了没有」在公开 API 里根本判不出来。
+- **Prevention:**
+  ① 新增 `AppAudioProbe`:用 `SCContentFilter(display:including:[app], exceptingWindows:[])` + `capturesAudio` 给**当前播放器**单独开一条捕获流(16×16@1fps、只算峰值不跑 FFT),按「有没有能量」判它在不在出声,0.3s 保持。复用截图已有的屏幕录制权限,不额外弹授权。
+  ② **没收到过音频 buffer 之前绝不说「静音」**:分不清「它本来就静着」和「按 app 捕获对它不生效」,说错会把正在播的卡片判成暂停。只有先听见它出声,之后的静音才可信;否则 `isSounding = nil`,调用方退回旧规则。
+  ③ 探针只在面板可见时对当前播放器生效(切人时先停旧流再建新流,`generation` 丢弃过期启动结果),收起面板即 `setTarget(nil)`,不留空转捕获流。
+  ④ 探针拿不到电平时用**锁存**(`audioOnlyLatch`)兜底:只认正向证据(离开出声列表=停、重新进入=播、混音由静变响且单一候选=播、点击意图),不再用「混音有声 + 在列表里」每次重推——那条正是「点了暂停又自己变回在播」的来源。待确认窗口内与意图相反的证据先不覆盖图标,窗口结束才认。
+  ⑤ 上报型 app(`.mediaRemote`)直接信 `playbackRate`,不再被「在不在出声列表里」盖掉。
+- **代价:** 多一条捕获流(≈ 一个 16×16@1fps 音频会话);按 app 捕获对个别 app 可能不生效(靠 `nil` 退回锁存);系统音量 0 时探针听不到声音,卡片会显示暂停(与律动一致,取舍见 DEV-085)。
+- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`,日志里应看到 `AppAudio: 探测 pid=... bundle=...`,暂停时 `NowPlaying: 探针 静音 → <bid>`(0.3s 内),律动同时压平;两个声源同时响时只有被暂停的那个卡片停,另一个不受影响。若看不到 `AppAudio: 探测`,说明该 app 拿不到捕获对象,走锁存兜底。
+
+## DEV-087: 「会话 owner 换人」不是「有人开始播」——切窗口会让卡片乱跳
+
+- **Pitfall:** 浏览器先播、QQ音乐后播(卡片显示 QQ)。暂停 QQ 后卡片正确停在 QQ(已暂停),但只要**把窗口切到浏览器**(不点任何按钮),卡片就跳到浏览器,而按钮实际还在控 QQ——显示和控制又对不上了。
+- **Cause:** 两条「不是操作却记账」的路径。① `trackOperations` 把「now playing 会话 owner 换人」当成一次操作(`operatedAt[bid] = now`):owner 只表示谁占着会话槽,把浏览器点到前台会让它重新注册会话、抢走槽位,于是浏览器拿到一个新时间戳,`updateCurrent` 里 `bestAt > cur.at` 成立就换人。② 上一版为「面板关着时用户可能在别处换着播」加了 `needsFreshPick`:重开面板时按「谁真的在响」重挑一次。但面板是悬停 HUD,频繁开关,而「当前播放器已暂停、另一个还在响」正是最典型的暂停后状态——每次重开都会把卡片抢到那个还在响的 app 上。
+- **Prevention:** ① **删掉 owner 换人这个信号**。浏览器真的开始播时,出声列表(信号 1)或 `playbackRate` 由停转播(信号 2)一定会动,不需要 owner;owner 只在首次挑人(`current == nil`)和排序 tiebreak 里用。② **删掉 `needsFreshPick`**,重开面板不重挑展示对象;关着期间真有人开播,靠 `previousActives` 还是旧集合就能认出(信号 1 会正常记账)。③ 顺带收紧信号 4(会话内容变了):只认「正在播 + 曲名变了」,不再认「进度跳回 0」——会话重新注册时进度也会跳回 0,切个窗口就够触发;暂停中的会话改标题同样不算开始播。④ `checkActivity` 的进/出列表证据在「前一帧为空」(面板刚打开)时不算数,否则整张表都会被当成「刚进入」。
+- **代价:** 浏览器在「占着输出流、不上报、也不进/出列表」的状态下换视频,可能不被认成一次新操作(要等它重新进列表或 rate 翻转)。
+- **验证:** 浏览器播视频 → QQ音乐播歌(卡片=QQ)→ 卡片里暂停 QQ → 反复把浏览器窗口切到前台/切回 QQ → 卡片必须一直停在 QQ(已暂停),日志里不应出现 `current ... → com.google.Chrome（新开播）`。
+
+## DEV-088: ⌘⇥ 缩略图「每次都在重新加载」——缓存三处配置合起来等于没缓存
+
+- **Pitfall:** 按 ⌘⇥ 弹出的切换器里,缩略图经常先空一拍再「刷」出来,感觉每次都重新抓图。
+- **Cause:** 三个独立配置叠加,让缓存命中率接近零:① `WindowThumbnailer.cacheTTL = 10`,两次 ⌘⇥ 间隔超过 10s 就整批过期(正常切窗口间隔远大于 10s);② `cacheCostLimit = 8MB`,而一张 168pt@2x 缩略图 ≈ 336×210×4 ≈ 282KB,只装得下 **约 28 张**,窗口一多 NSCache 就在会话内淘汰旧图,`countLimit = 40` 根本没机会生效;③ `CommandTabSwitcher.presentSession` **不读缓存**——`cachedThumbnail(for:)` 只有 Dock 预览在用,切换器要么等 `fetchThumbnails` 整批抓完,要么 250ms 兜底先弹,冷缓存时就是「先 app 图标、再一张张补缩略图」。
+- **Prevention:** ① TTL 10s → 60s(切换器要的是「一眼认出是哪个窗口」,几十秒内容陈旧比每次重抓伤得轻);② costLimit 8MB → 32MB(≈110 张)、countLimit 40 → 80,内存代价有界;③ `presentSession` 先用 `cachedThumbnail` 预填 tiles,`allSatisfy(有图)` 时**零等待上屏**,后台抓取只做替换;④ `dismissSession` 对仍缺图的瓦片延迟 1.5s 调 `prewarm` 补抓(绕过抓取节流)。
+- **代价:** 缓存里的图可能陈旧最多 60s;因此缓存条目必须记 `bounds`,宽高比变化超 8% 视为过期(否则 resize/全屏后旧图被拉伸,TTL 越长越明显)。定时轮询预热不做——空闲抓图是无谓开销,TTL 内缓存本身就是热的。
+- **验证:** `ZEROFLOW_SWITCHER_DEBUG=1` 启动,连按两次 ⌘⇥,`/tmp/zeroflow.log` 里第二次应出现 `SWITCHER present windows=N cachedPrefill=N`(N 相等 = 全命中),面板当帧就有缩略图。

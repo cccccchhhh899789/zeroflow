@@ -41,6 +41,8 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
     private var panel: ClipboardPanel?
     private var model: ClipboardViewModel?
+    /// SwiftUI 内容宿主：定宽 `expandedWidth`，按预览方向钉在窗口左边缘或右边缘（DEV-068）
+    private weak var hostingView: NSView?
     private var cancellables = Set<AnyCancellable>()
     private var keyMonitor: Any?
     private var pendingPreview: DispatchWorkItem?
@@ -96,12 +98,24 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
     /// 调试入口：忽略开关直接弹出（`ZEROFLOW_CLIPBOARD_DEBUG=1`），`expandAfter > 0` 时再自动展开首条预览
     func showForDebug(expandAfter delay: TimeInterval = 0) {
         show(force: true)
+        // `ZEROFLOW_PANEL_SNAPSHOT=<dir>`：把面板内容离屏抓成 PNG，用于无法截屏的环境下核对排版
+        if let dir = ProcessInfo.processInfo.environment["ZEROFLOW_PANEL_SNAPSHOT"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.debugSnapshot("\(dir)/collapsed.png")
+            }
+        }
         guard delay > 0 else { return }
+        // show() 里已为首条起了停留计时，这里接管，避免两条路径各展开一次
+        pendingPreview?.cancel()
+        pendingPreview = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, let model = self.model, let item = model.filteredItems.first else { return }
-            self.previewSide = self.hasSpaceOnRight ? .right : .left
-            model.previewItem = item
-            self.applyFrame(animated: true)
+            self.expandPreview(with: item)
+            if let dir = ProcessInfo.processInfo.environment["ZEROFLOW_PANEL_SNAPSHOT"] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    self?.debugSnapshot("\(dir)/expanded.png")
+                }
+            }
         }
     }
 
@@ -149,7 +163,7 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         ZSLog("clipboard panel dismissed")
         if didActivateApp {
             didActivateApp = false
-            previousApp?.activate(options: [.activateIgnoringOtherApps])
+            previousApp?.activate()
         }
     }
 
@@ -181,14 +195,22 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
                 guard let self, self.model === model else { return }
                 let wasEmpty = model.items.isEmpty
                 guard wasEmpty || model.items.map(\.id) != items.map(\.id) else { return }
+                let oldRowCount = ClipboardPanelMetrics.rows(for: model.filteredItems.count)
                 model.items = items
                 model.selectedIndex = min(model.selectedIndex, max(0, model.filteredItems.count - 1))
                 if let preview = model.previewItem, !items.contains(where: { $0.id == preview.id }) {
                     model.previewItem = nil
                 }
-                if wasEmpty { self.applyFrame(animated: false) }
-                // 历史是后台加载的：弹出时还没有条目就补一次首条预览计时
-                if model.previewItem == nil, model.query.isEmpty { self.schedulePreview() }
+                // 行数变了（删除/清空/后台加载完成）必须重新落 frame，
+                // 否则面板会留着被删掉那条的高度，底部空出一截
+                let newRowCount = ClipboardPanelMetrics.rows(for: model.filteredItems.count)
+                if wasEmpty || newRowCount != oldRowCount {
+                    // 后台加载完成没有用户动作，无动画落位；删除/清空走收缩动画
+                    self.applyFrame(animated: !wasEmpty)
+                }
+                // 只给「弹出时历史还没加载完」补一次首条预览计时。
+                // 删除后不主动展开新条目：否则收缩动画会立刻被重展开打断，看着像抽搐
+                if wasEmpty, model.previewItem == nil, model.query.isEmpty { self.schedulePreview() }
             }
             .store(in: &cancellables)
     }
@@ -227,6 +249,32 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         pasteSelected()
     }
 
+    // MARK: - 删除
+
+    /// 删除单条：Store 落盘 + 清图片文件，面板高度由 `$items` 订阅统一 refit
+    private func delete(_ item: ClipboardItem) {
+        guard let model, model.items.contains(where: { $0.id == item.id }) else { return }
+        pendingPreview?.cancel()
+        pendingPreview = nil
+        // 先收掉预览再删：被删项正在预览时，留一帧旧内容会闪
+        if model.previewItem?.id == item.id { model.previewItem = nil }
+        ClipboardHistoryStore.shared.remove(id: item.id)
+        ZSLog("clipboard: deleted item, remaining=\(ClipboardHistoryStore.shared.items.count)")
+    }
+
+    private func deleteSelected() {
+        guard let model, let item = model.selectedItem else { return }
+        delete(item)
+    }
+
+    private func clearAll() {
+        pendingPreview?.cancel()
+        pendingPreview = nil
+        model?.previewItem = nil
+        ClipboardHistoryStore.shared.clear()
+        ZSLog("clipboard: cleared all")
+    }
+
     private func moveSelection(by step: Int) {
         guard let model else { return }
         let count = model.filteredItems.count
@@ -257,15 +305,52 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         let work = DispatchWorkItem { [weak self] in
             guard let self, let model = self.model, panel.isVisible,
                   model.selectedItem?.id == expectedID else { return }
-            model.previewItem = item
-            self.previewSide = self.hasSpaceOnRight ? .right : .left
-            self.applyFrame(animated: true)
+            self.expandPreview(with: item)
         }
         pendingPreview = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay) / 1000, execute: work)
     }
 
+    /// 展开预览：先把内容布局+绘制完，再让窗口生长。
+    /// 顺序反了的话窗口先变宽、内容后画，中间那几帧窗口显示的是被横向拉伸的旧内容（DEV-068）
+    private func expandPreview(with item: ClipboardItem) {
+        guard panel != nil, let model else { return }
+        // 幂等：同一项已经设过 previewItem（展开在途或已完成）就不再触发第二次，
+        // 否则两条入口（停留计时 / 调试入口）会让窗口动画被重新起手
+        if model.previewItem?.id == item.id { return }
+        // 先定布局方向再出内容：一次求值就排好，避免「先右后左」两阶段重排
+        previewSide = hasSpaceOnRight ? .right : .left
+        let onLeft = previewSide == .left
+        if model.previewOnLeft != onLeft { model.previewOnLeft = onLeft }
+        // 钉法必须跟布局方向一起在预渲染之前就位，否则预渲染画的是「方向已换、内容还钉在旧边」的中间态
+        pinHosting(toLeftSide: onLeft)
+        model.previewItem = item
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let panel = self.panel, panel.isVisible,
+                  self.model?.previewItem?.id == item.id else { return }
+            // 预渲染必须发生在窗口起手之前：窗口服务一旦开始生长，主线程就只剩每帧十几毫秒的预算
+            let t0 = CACurrentMediaTime()
+            panel.contentView?.layoutSubtreeIfNeeded()
+            panel.contentView?.displayIfNeeded()
+            let prerender = (CACurrentMediaTime() - t0) * 1000
+            self.applyFrame(animated: true)
+            ZSLog(String(format: "preview prerender %.2fms, win=%.0fx%.0f",
+                         prerender, panel.frame.width, panel.frame.height))
+        }
+    }
+
     // MARK: - 键盘
+
+    /// 把面板内容离屏抓成 PNG（`ZEROFLOW_PANEL_SNAPSHOT=<dir>`，用于无法截屏的环境核对排版）
+    private func debugSnapshot(_ path: String) {
+        guard let view = panel?.contentView else { return }
+        view.layoutSubtreeIfNeeded()
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return }
+        try? data.write(to: URL(fileURLWithPath: path))
+        ZSLog("snapshot -> \(path) bounds=\(Int(view.bounds.width))x\(Int(view.bounds.height))")
+    }
 
     private func installKeyMonitorOnce() {
         guard keyMonitor == nil else { return }
@@ -285,6 +370,14 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
                 return nil
             case 36, 76: // return / enter
                 self.pasteSelected()
+                return nil
+            case 51, 117: // delete / forward delete
+                // 搜索框有内容时 Delete 该删字符，交还给 TextField；
+                // 此时要删记录用 ⌘⌫（带 command 一律当删除记录处理）
+                let deleteItem = event.modifierFlags.contains(.command)
+                    || (self.model?.query.isEmpty ?? true)
+                guard deleteItem else { return event }
+                self.deleteSelected()
                 return nil
             default:
                 return event
@@ -343,8 +436,7 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
     private var hasSpaceOnRight: Bool {
         guard let screen = anchorScreen else { return true }
-        let needed = baseX + ClipboardPanelMetrics.listWidth + ClipboardPanelMetrics.dividerWidth
-            + ClipboardPanelMetrics.previewWidth + 8
+        let needed = baseX + ClipboardPanelMetrics.expandedWidth + 8
         return needed <= screen.visibleFrame.maxX
     }
 
@@ -391,10 +483,12 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         var height = ClipboardPanelMetrics.height(for: model.filteredItems.count)
         height = min(height, visible.height - 16)
         let previewing = model.previewItem != nil
-        model.previewOnLeft = previewSide == .left
-        let expandedWidth = ClipboardPanelMetrics.listWidth + ClipboardPanelMetrics.dividerWidth
-            + ClipboardPanelMetrics.previewWidth
-        let width = previewing ? expandedWidth : ClipboardPanelMetrics.listWidth
+        // 预览在左时内容要右对齐钉住（见 pinHosting），收起态保持上次的方向即可：
+        // 两种布局下列表都正好铺满 360 宽窗口，保持不动能省掉「收起后再切一次布局」的跳变（DEV-068）
+        let onLeft = previewing ? (previewSide == .left) : model.previewOnLeft
+        if model.previewOnLeft != onLeft { model.previewOnLeft = onLeft }
+        pinHosting(toLeftSide: onLeft)
+        let width = previewing ? ClipboardPanelMetrics.expandedWidth : ClipboardPanelMetrics.listWidth
 
         var x = baseX
         if previewing, previewSide == .left {
@@ -406,6 +500,7 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
         let frame = NSRect(x: x, y: y, width: width, height: height)
         ZSLog("clipboard: frame -> x=\(Int(x)) top=\(Int(y + height)) \(Int(width))x\(Int(height)) preview=\(previewing) side=\(previewSide) animated=\(animated)")
+        // 两个方向都走生长动画：内容已钉在「不动的那个边」上，窗口朝哪边长，另一边就是抽出来的抽屉
         guard animated else {
             panel.setFrame(frame, display: true)
             return
@@ -414,6 +509,20 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
             context.duration = 0.16
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().setFrame(frame, display: true)
+        }
+    }
+
+    /// 把定宽内容钉在窗口的「不动边」上，让窗口生长时列表原地不动、预览像抽屉一样抽出来：
+    /// - 预览在右 → 钉左边缘（内容局部 0 是列表，右侧 461pt 是预览），窗口向右长；
+    /// - 预览在左 → 钉右边缘（内容局部 461 起是列表，左侧 460pt 是预览），窗口向左长。
+    /// 收起态（窗口 360 宽）两种钉法下列表都正好铺满窗口，所以切换钉法本身不产生视觉跳变（DEV-068）
+    private func pinHosting(toLeftSide: Bool) {
+        guard let container = panel?.contentView, let hosting = hostingView else { return }
+        let targetX = toLeftSide ? container.bounds.width - ClipboardPanelMetrics.expandedWidth : 0
+        let mask: NSView.AutoresizingMask = toLeftSide ? [.minXMargin, .height] : [.height]
+        if hosting.autoresizingMask != mask { hosting.autoresizingMask = mask }
+        if abs(hosting.frame.origin.x - targetX) > 0.5 {
+            hosting.setFrameOrigin(NSPoint(x: targetX, y: 0))
         }
     }
 
@@ -433,19 +542,33 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         let root = ClipboardPanelView(
             model: model,
             onSelect: { [weak self] index in self?.select(index) },
-            onHover: { [weak self] index in self?.hover(index) }
+            onHover: { [weak self] index in self?.hover(index) },
+            onDelete: { [weak self] item in self?.delete(item) },
+            onClear: { [weak self] in self?.clearAll() }
         )
         let size = collapsedSize(rowCount: model.filteredItems.count)
         let container = NSView(frame: NSRect(origin: .zero, size: size))
+        // 圆角在宿主 layer 上裁：内容恒定 821 宽，收起态窗口只有 360，把圆角画在内容上会跑到窗口外，
+        // 右边缘变直角；裁在宿主上则任何宽度都贴着窗口边缘。顺带把遮罩从 821 宽的 SwiftUI 视图上摘掉（DEV-068）
+        container.wantsLayer = true
+        container.layer?.cornerRadius = ClipboardPanelMetrics.cornerRadius
+        container.layer?.masksToBounds = true
         let background = makeBackground(size: size)
         container.addSubview(background)
         let hosting = NSHostingView(rootView: root)
-        hosting.frame = container.bounds
-        hosting.autoresizingMask = [.width, .height]
+        // hosting 固定成展开态宽度、只让高度跟随宿主：
+        // 跟随窗口宽度的话，收起态（360）的 layer backing store 也只有 360 宽，右侧 461pt 的预览列
+        // 压根没被光栅化；窗口生长时得靠主线程逐帧补画，主线程一停顿窗口服务就把旧内容横向拉伸，
+        // 也就是那个"有概率闪一下"。定宽 821 则预览列在动画起手前就已经画完，生长纯粹是"揭开"（DEV-068）
+        hosting.frame = NSRect(x: 0, y: 0, width: ClipboardPanelMetrics.expandedWidth, height: size.height)
+        hosting.autoresizingMask = [.height]
         // hosting 必须靠 autoresizing 跟随宿主：挂 glass.contentView 或用约束会反向钳死窗口尺寸（DEV-024）
+        // 超宽部分由窗口自身裁掉，宿主 layer 默认不 masksToBounds
         container.addSubview(hosting)
+        hostingView = hosting
         panel.contentView = container
         panel.setContentSize(size)
+        ZSLog("clipboard content installed: window=\(Int(size.width))x\(Int(size.height)) hosting=\(Int(hosting.frame.width))x\(Int(hosting.frame.height))")
     }
 
     /// 背景：macOS 26+ 原生液态玻璃（样式与系统一致，跟随外观/降低透明度），旧系统回退磨砂

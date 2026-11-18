@@ -27,6 +27,12 @@ final class WindowActivityTracker {
     private var switcherGuard: (pid: pid_t, wid: CGWindowID, deadline: Date)?
     private var observers: [NSObjectProtocol] = []
     private var axObservers: [pid_t: AXObserver] = [:]
+    /// 注册失败过的 pid（WebKit/XPC 服务、拒绝 AX 的 app）：同一 pid 不再重试。
+    /// 不缓存的话每次 app 激活都要重付一遍消息超时（实测 1.5s/个，见 DEV-083）
+    private var failedPids: Set<pid_t> = []
+    /// AX 注册串行队列：`AXObserverAddNotification` 是同步 IPC，目标不回包就等满消息超时，
+    /// 绝不能放主线程——打开设置 = app 激活 = 全量重建，主线程一堵就是十几秒（见 DEV-083）
+    private let axQueue = DispatchQueue(label: "zeroflow.window-activity-ax", qos: .utility)
     /// 主动补记用的串行后台队列：AX 重读聚焦窗口不堵主线程，且保序（后到的激活覆盖先到的）
     private let bumpQueue = DispatchQueue(label: "zeroflow.window-activity-bump", qos: .userInitiated)
     /// Space 切换去抖任务（仅主线程访问）：连续滑动只补记最后一次落定的 Space
@@ -119,18 +125,42 @@ final class WindowActivityTracker {
     }
 
     private func rebuildObservers() {
-        for app in NSWorkspace.shared.runningApplications {
-            guard app.activationPolicy != .prohibited else { continue }
-            addObserver(for: app.processIdentifier)
+        // 整轮重建丢到 AX 队列：`AXObserverAddNotification` 是同步 IPC，碰上不回包的进程
+        // 要等满消息超时（QQ音乐的 WebKit 子进程实测 1.5s/个，十几个串起来就是二十秒），
+        // 放主线程 = 「打开设置卡死」（见 DEV-083）
+        axQueue.async { [weak self] in
+            guard let self else { return }
+            for app in NSWorkspace.shared.runningApplications {
+                self.registerObserver(for: app.processIdentifier)
+            }
         }
     }
 
+    /// 异步入口（app 启动通知）：真正的 AX 调用在 `axQueue` 上做
     private func addObserver(for pid: pid_t) {
         guard AccessibilityPermission.isGranted else { return }
-        lock.lock(); let exists = axObservers[pid] != nil; lock.unlock()
-        guard !exists else { return }
+        // 新启动的进程：pid 可能是复用，也可能上次只是启动瞬间忙而注册失败，清掉记录再试一次
+        lock.lock(); failedPids.remove(pid); lock.unlock()
+        axQueue.async { [weak self] in self?.registerObserver(for: pid) }
+    }
+
+    /// 同步注册（**必须在 `axQueue` 上调用**）。已注册 / 已失败 / 不适合当 AX 客户端的 pid 直接跳过。
+    private func registerObserver(for pid: pid_t) {
+        guard AccessibilityPermission.isGranted else { return }
+        lock.lock()
+        let done = axObservers[pid] != nil || failedPids.contains(pid)
+        lock.unlock()
+        guard !done else { return }
+
+        guard let app = NSRunningApplication(processIdentifier: pid),
+              Self.isAXClientCandidate(app) else {
+            markFailed(pid)
+            return
+        }
 
         let appElement = AXUIElementCreateApplication(pid)
+        // 单次 AX 调用封顶 0.5s：默认超时下，一个卡住的 app 就能把整轮注册拖到十几秒
+        AXUIElementSetMessagingTimeout(appElement, 0.5)
         var observer: AXObserver?
         let callback: AXObserverCallback = { _, element, _, info in
             guard let info else { return }
@@ -143,12 +173,16 @@ final class WindowActivityTracker {
                 tracker.noteFocus(pid: pid, wid: wid, source: "ax")
             }
         }
-        guard AXObserverCreate(pid, callback, &observer) == .success, let observer else { return }
+        guard AXObserverCreate(pid, callback, &observer) == .success, let observer else {
+            markFailed(pid)
+            return
+        }
         let context = Unmanaged.passUnretained(self).toOpaque()
         let addError = AXObserverAddNotification(observer, appElement, kAXFocusedWindowChangedNotification as CFString, context)
         guard addError == .success else {
             // 个别 app 对该通知注册失败且此后不会再有任何窗口级焦点通知（此前静默失败，排查时是盲区）
-            ZSLog("WindowActivityTracker: AXObserverAddNotification failed pid=\(pid) err=\(addError.rawValue)")
+            ZSLog("WindowActivityTracker: AXObserverAddNotification failed pid=\(pid) err=\(addError.rawValue)（不再重试）")
+            markFailed(pid)
             return
         }
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
@@ -157,9 +191,28 @@ final class WindowActivityTracker {
         lock.unlock()
     }
 
+    /// 能否当 AX 客户端。WebKit / 系统 XPC 服务（`type=UIElement`、sandboxed、无 bundleURL）
+    /// 一律不能：给它们 `AXObserverAddNotification` 只会等满消息超时再返回
+    /// `kAXErrorCannotComplete(-25204)`（实测 1.5s/个，见 DEV-083）
+    private static func isAXClientCandidate(_ app: NSRunningApplication) -> Bool {
+        guard app.activationPolicy != .prohibited else { return false }
+        if (app.bundleIdentifier ?? "").hasPrefix("com.apple.WebKit") { return false }
+        if let path = app.bundleURL?.path, path.contains(".xpc/") { return false }
+        // 没有 bundle 的进程（守护进程、helper）没有可观察的窗口
+        return app.bundleURL != nil
+    }
+
+    private func markFailed(_ pid: pid_t) {
+        lock.lock()
+        failedPids.insert(pid)
+        lock.unlock()
+    }
+
     private func removeObserver(for pid: pid_t) {
         lock.lock()
         let observer = axObservers.removeValue(forKey: pid)
+        // pid 可能被复用，失败记录一并清掉
+        failedPids.remove(pid)
         // app 已退出：一并清掉它的窗口 MRU，避免字典随窗口开关无限增长
         for wid in activityOwner.compactMap({ $0.value == pid ? $0.key : nil }) {
             activity.removeValue(forKey: wid)

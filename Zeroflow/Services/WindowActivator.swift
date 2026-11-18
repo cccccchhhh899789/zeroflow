@@ -58,7 +58,7 @@ final class WindowActivator {
                (try? NSWorkspace.shared.launchApplication(at: bundleURL, configuration: [:])) != nil {
                 ZSLog("WindowActivator: relaunched windowless app pid=\(window.pid)")
             } else {
-                app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                app.activate(options: [.activateAllWindows])
                 ZSLog("WindowActivator: activated windowless app pid=\(window.pid) (launch failed)")
             }
             return
@@ -78,19 +78,19 @@ final class WindowActivator {
             // （不带 activateAllWindows，避免把同 app 另一个全屏 Space 拉回来）。
             if CGSWindowServer.shared.setFrontProcess(windowId: window.id, pid: window.pid) {
                 CGSWindowServer.shared.makeKeyWindow(pid: window.pid, windowId: window.id)
-                app.activate(options: [.activateIgnoringOtherApps])
+                app.activate()
                 ZSLog("WindowActivator: no AX window matched wid=\(window.id), focused via SkyLight + app activate")
                 return
             }
             ZSLog("WindowActivator: no AX window matched wid=\(window.id), fallback to app activate")
-            app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            app.activate(options: [.activateAllWindows])
             return
         }
 
         // 1. 最小化窗口先还原（动画结束前不再重抓，避免迷你帧）——还原路径维持 AX + activate（已验证）
         if window.isMinimized {
             AXUIElementSetAttributeValue(axWindow, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-            app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            app.activate(options: [.activateAllWindows])
             AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
             AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
             ZSLog("WindowActivator: raised (unminimized) wid=\(window.id) title='\(window.title)'")
@@ -113,7 +113,7 @@ final class WindowActivator {
             AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
             AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
         } else {
-            app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            app.activate(options: [.activateAllWindows])
             AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
             AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
         }

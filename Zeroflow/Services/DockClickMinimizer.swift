@@ -620,6 +620,9 @@ final class DockClickMinimizer {
 
     /// 返回点击点对应的 Dock 项 app（快路径缓存命中优先，未命中走 AX 权威命中测试）
     private func appFromDockItem(at point: CGPoint) -> NSRunningApplication? {
+        // 点落在自家窗口上：一律不当 Dock 点击。既避免误吞（预览面板盖在 Dock 图标上），
+        // 也避免在 event tap 线程上解 AX——见 appFromHitTest 的注释（DEV-083）
+        guard !Self.isOwnWindowPoint(point) else { return nil }
         if let entry = cachedEntry(at: point),
            let app = entry.app {
             return app
@@ -627,9 +630,27 @@ final class DockClickMinimizer {
         return appFromHitTest(at: point)
     }
 
+    /// 点是否落在本 app 自己的窗口里。用 CGWindowList 而不是 `NSApp.windows`：这里是 event tap
+    /// 线程，碰 AppKit 的窗口数组不安全；CGWindowList 线程安全，且坐标本来就是左上原点，无需换算
+    private static func isOwnWindowPoint(_ point: CGPoint) -> Bool {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                   kCGNullWindowID) as? [[String: Any]] else { return false }
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        for info in list {
+            guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == selfPID,
+                  (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { continue }
+            if rect.contains(point) { return true }
+        }
+        return false
+    }
+
     /// AX 命中测试：直接问系统「该点上是什么元素」，再向上找最近的 Dock 项
     private func appFromHitTest(at point: CGPoint) -> NSRunningApplication? {
         let systemWide = AXUIElementCreateSystemWide()
+        // 单次命中测试封顶 0.3s：Dock 不响应时别把 event tap 线程拖到被系统判定超时
+        AXUIElementSetMessagingTimeout(systemWide, 0.3)
         var raw: AXUIElement?
         guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &raw) == .success,
               let raw else { return nil }

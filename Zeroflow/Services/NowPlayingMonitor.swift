@@ -10,6 +10,9 @@ struct NowPlayingInfo {
     let album: String?
     let appBundleID: String?
     let appName: String?
+    /// 播放器宿主 app 的 pid（「打开」按钮用它调度窗口）。nil = app 已不在运行——
+    /// 这种条目不进卡片：有音源就说明 app 开着，卡片上的一切动作都以它为前提
+    let pid: pid_t?
     let isPlaying: Bool
     let elapsed: Double?
     let duration: Double?
@@ -18,7 +21,13 @@ struct NowPlayingInfo {
 
     func setting(isPlaying: Bool) -> NowPlayingInfo {
         NowPlayingInfo(title: title, artist: artist, album: album, appBundleID: appBundleID,
-                       appName: appName, isPlaying: isPlaying, elapsed: elapsed,
+                       appName: appName, pid: pid, isPlaying: isPlaying, elapsed: elapsed,
+                       duration: duration, control: control)
+    }
+
+    func setting(pid: pid_t?) -> NowPlayingInfo {
+        NowPlayingInfo(title: title, artist: artist, album: album, appBundleID: appBundleID,
+                       appName: appName, pid: pid, isPlaying: isPlaying, elapsed: elapsed,
                        duration: duration, control: control)
     }
 }
@@ -75,6 +84,20 @@ final class NowPlayingMonitor: ObservableObject {
     static func isAllowed(_ bundleID: String?) -> Bool {
         guard let bundleID else { return false }
         return allowedBundles.contains { AudioActivityMonitor.sameApp(bundleID, $0) }
+    }
+
+    /// bundleID 对应的**宿主 app**（卡片上「打开」按钮要激活的那个进程）。nil = 没在运行。
+    ///
+    /// 只认 `.regular` 进程并精确匹配优先：Chrome 的 helper 也是 `NSRunningApplication`，
+    /// 拿它的 pid 去激活窗口只会落空（而且 `sameApp` 前缀比对会把 helper 判成宿主）。
+    static func runningApp(bundleID: String?) -> NSRunningApplication? {
+        guard let bundleID else { return nil }
+        let apps = NSWorkspace.shared.runningApplications.filter {
+            !$0.isTerminated && $0.activationPolicy == .regular
+        }
+        if let exact = apps.first(where: { $0.bundleIdentifier == bundleID }) { return exact }
+        // 会话报的是 helper / WebKit 进程的 bundle 时，前缀归并到宿主
+        return apps.first { AudioActivityMonitor.sameApp($0.bundleIdentifier, bundleID) }
     }
 
     enum Command: UInt {
@@ -501,9 +524,15 @@ final class NowPlayingMonitor: ObservableObject {
         // （实测 app 退出 12s 后长跑进程还报它的 bundleID，新进程立刻正确），
         // 而 C 接口在这版 macOS 上被阉（PID 恒 0、DisplayID 恒 nil），见 DEV-082
         let rawMedia = readNowPlaying()
-        // 白名单：非白名单 app 的上报会话直接丢弃。不丢的话 `current` 为空时
-        // 会退到「暂停态会话」那条分支直接出卡（Safari/语音备忘录都会走到这里）
-        let media = rawMedia.flatMap { Self.isAllowed($0.appBundleID) ? $0 : nil }
+        // 白名单 + 存活校验：非白名单 app 的上报会话直接丢弃。不丢的话 `current` 为空时
+        // 会退到「暂停态会话」那条分支直接出卡（Safari/语音备忘录都会走到这里）。
+        // 存活校验同时兜住「app 已退出、会话还残留」的条目——卡片上的「打开」按钮
+        // 和媒体控制都以 app 在跑为前提，pid 拿不到就不出卡
+        let media = rawMedia.flatMap { info -> NowPlayingInfo? in
+            guard Self.isAllowed(info.appBundleID),
+                  let app = Self.runningApp(bundleID: info.appBundleID) else { return nil }
+            return info.setting(pid: app.processIdentifier)
+        }
         // owner 就用会话自己报的 bundleID——它和媒体键的目标是同一个，而且比单独再查一次省事
         let owner = media?.appBundleID ?? Self.nowPlayingOwnerBundleID()
         let rawActives = AudioActivityMonitor.activeApps(owner: owner)
@@ -583,12 +612,9 @@ final class NowPlayingMonitor: ObservableObject {
                                     at: bestAt > 0 ? bestAt : now)
         } else if let owner, let owned = actives.first(where: { AudioActivityMonitor.sameApp($0.bundleID, owner) }) {
             current = CurrentPlayer(pid: owned.pid, bundleID: owned.bundleID, name: owned.name, at: now)
-        } else if let media, let bid = media.appBundleID, media.isPlaying,
-                  let app = NSWorkspace.shared.runningApplications.first(where: {
-                      !$0.isTerminated && AudioActivityMonitor.sameApp($0.bundleIdentifier, bid)
-                  }) {
-            current = CurrentPlayer(pid: app.processIdentifier, bundleID: bid,
-                                    name: app.localizedName, at: now)
+        } else if let media, let pid = media.pid, media.isPlaying {
+            current = CurrentPlayer(pid: pid, bundleID: media.appBundleID,
+                                    name: media.appName, at: now)
         }
         if Self.debug, let cur = current {
             ZSLog("NowPlaying: current=\(cur.bundleID ?? "?")（初始）")
@@ -650,6 +676,7 @@ final class NowPlayingMonitor: ObservableObject {
             album: nil,
             appBundleID: cur.bundleID,
             appName: cur.name,
+            pid: pid,
             // 它在出声列表里不代表在响：暂停后仍可能占着输出流，以「有没有声音」为准
             isPlaying: audible ?? true,
             elapsed: nil,
@@ -857,6 +884,8 @@ final class NowPlayingMonitor: ObservableObject {
             album: string(info, "kMRMediaRemoteNowPlayingInfoAlbum"),
             appBundleID: appBundleID,
             appName: appName,
+            // pid 由 `read()` 统一补：那里才做白名单 + 存活校验
+            pid: nil,
             isPlaying: isPlaying,
             elapsed: double(info, "kMRMediaRemoteNowPlayingInfoElapsedTime"),
             duration: double(info, "kMRMediaRemoteNowPlayingInfoDuration"),
@@ -889,6 +918,7 @@ final class NowPlayingMonitor: ObservableObject {
             album: parts[2].isEmpty ? nil : String(parts[2]),
             appBundleID: parts[3].isEmpty ? nil : String(parts[3]),
             appName: parts[4].isEmpty ? nil : String(parts[4]),
+            pid: nil,
             isPlaying: num(parts[7]).map { $0 != 0 } ?? true,
             elapsed: num(parts[6]),
             duration: num(parts[5]),

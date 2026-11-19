@@ -475,6 +475,10 @@ final class NotchHotspotController {
 
     func debugCycleHide() { hidePanel(reason: "mem-cycle") }
 
+    /// 卡片动作触发的收起（如「正在播放」的「打开 app」）：先收面板再激活目标窗口，
+    /// 别让悬浮 HUD 挡住刚跳出来的窗口。与 Dock 预览点击卡片的行为一致
+    func dismissPanel(reason: String) { hidePanel(reason: reason) }
+
     /// 单击热区立即弹出（无需等悬停延时）
     private func openNow() {
         lock.lock()

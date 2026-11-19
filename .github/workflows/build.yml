@@ -34,8 +34,8 @@ jobs:
             archs: arm64
           - arch: x86_64
             archs: x86_64
-          - arch: universal
-            archs: "arm64 x86_64"
+          # - arch: universal
+          #   archs: "arm64 x86_64"
 
     steps:
       - name: Checkout

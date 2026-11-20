@@ -43,6 +43,7 @@ macOS ネイティブの軽量ユーティリティ集。スクリーンショ�
 
 ```bash
 xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow \
+  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
   -configuration Debug -derivedDataPath build -allowProvisioningUpdates build
 open build/Build/Products/Debug/Zeroflow.app
 ```

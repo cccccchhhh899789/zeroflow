@@ -1001,7 +1001,11 @@ struct NotchContentView: View {
                             .lineLimit(1)
                     }
                 }
-                Spacer(minLength: 0)
+                Spacer(minLength: 4)
+                // pid 非空 = app 还开着。有音源就说明 app 在跑，缺的只是窗口不在前台
+                if let pid = info.pid {
+                    OpenAppButton(appName: info.appName) { openApp(info, pid: pid) }
+                }
             }
 
             Spacer(minLength: 6)
@@ -1118,6 +1122,12 @@ struct NotchContentView: View {
 
     private func musicButton(_ symbol: String, _ label: String, disabled: Bool, action: @escaping () -> Void) -> some View {
         MusicControlButton(symbol: symbol, label: label, disabled: disabled, action: action)
+    }
+
+    /// 收起面板再把播放器窗口调度到前台。先收再激活——悬浮 HUD 不该盖住刚跳出来的窗口
+    private func openApp(_ info: NowPlayingInfo, pid: pid_t) {
+        NotchHotspotController.shared.dismissPanel(reason: "open playing app")
+        WindowActivator.shared.openApp(pid: pid, bundleID: info.appBundleID)
     }
 
     private func moduleHeader(_ icon: String, _ title: String) -> some View {
@@ -1325,6 +1335,59 @@ private struct MusicControlButton: View {
 
     private func pressDown() {
         guard !disabled else { return }
+        releaseTask?.cancel()
+        releaseTask = nil
+        pressed = true
+    }
+
+    private func pressUp() {
+        guard pressed else { return }
+        let task = DispatchWorkItem { pressed = false }
+        releaseTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.minPressDuration, execute: task)
+    }
+}
+
+/// 「打开 app」胶囊按钮：把正在播放的 app 窗口调度到前台。
+///
+/// 按下反馈沿用 `MusicControlButton` 的「最短可见按下态」——触控板轻点会在同一帧
+/// down+up，只靠 `ButtonStyle.isPressed` 一帧动画都跑不出来。
+private struct OpenAppButton: View {
+    let appName: String?
+    let action: () -> Void
+
+    @State private var pressed = false
+    @State private var releaseTask: DispatchWorkItem?
+
+    private static let minPressDuration: TimeInterval = 0.12
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.up.forward.app")
+                    .font(.system(size: 9, weight: .semibold))
+                Text(L10n.tr("打开"))
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundColor(.primary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Color.primary.opacity(pressed ? 0.22 : 0.10)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(appName.map { "\(L10n.tr("打开")) \($0)" } ?? L10n.tr("打开"))
+        .scaleEffect(pressed ? 0.92 : 1)
+        .animation(.spring(response: 0.18, dampingFraction: 0.55), value: pressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in pressDown() }
+                .onEnded { _ in pressUp() }
+        )
+    }
+
+    private func pressDown() {
         releaseTask?.cancel()
         releaseTask = nil
         pressed = true

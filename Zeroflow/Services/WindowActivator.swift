@@ -41,6 +41,38 @@ final class WindowActivator {
         ZSLog("WindowActivator: focused own window wid=\(window.id)")
     }
 
+    /// 把某个 app 的窗口调度到前台（灵动岛「正在播放」卡片的「打开」按钮）。
+    ///
+    /// 有窗口就复用切换器激活链：最小化自动还原、跨 Space / 全屏 Space 按窗口切。
+    /// 窗口全关掉的 app（Chrome 关光窗口仍在跑）走 relaunch 触发 reopen 新建窗口——
+    /// 对无窗口 app 调 `activate` 只会点亮菜单栏，不会给用户一个窗口。
+    func openApp(pid: pid_t, bundleID: String?) {
+        let app = NSRunningApplication(processIdentifier: pid) ?? bundleID.flatMap { bid in
+            NSWorkspace.shared.runningApplications.first {
+                !$0.isTerminated && $0.bundleIdentifier == bid
+            }
+        }
+        guard let app, !app.isTerminated else {
+            ZSLog("WindowActivator: openApp pid=\(pid) 已退出，忽略")
+            return
+        }
+        // 列表里含无窗口 app 的占位卡（isWindowlessApp，合成 id），那不是真窗口
+        let windows = WindowList.shared.enumerate().filter { !$0.isWindowlessApp }
+        let mine = windows.filter { $0.pid == app.processIdentifier }
+        ZSLog("WindowActivator: openApp pid=\(pid) 窗口总数=\(windows.count) 本 app=\(mine.count)")
+        if let window = mine.first {
+            focus(window: window)
+            return
+        }
+        if let bundleURL = app.bundleURL,
+           (try? NSWorkspace.shared.launchApplication(at: bundleURL, configuration: [:])) != nil {
+            ZSLog("WindowActivator: openApp relaunch pid=\(pid)（无窗口）")
+        } else {
+            app.activate(options: [.activateAllWindows])
+            ZSLog("WindowActivator: openApp activate pid=\(pid)（无窗口，relaunch 失败）")
+        }
+    }
+
     private func focusSync(_ window: SwitcherWindow) {
         let app = window.app
 

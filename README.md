@@ -43,6 +43,7 @@ Requires macOS 14.0+ and Xcode 16+.
 
 ```bash
 xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow \
+  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
   -configuration Debug -derivedDataPath build -allowProvisioningUpdates build
 open build/Build/Products/Debug/Zeroflow.app
 ```

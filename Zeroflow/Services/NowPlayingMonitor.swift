@@ -10,6 +10,9 @@ struct NowPlayingInfo {
     let album: String?
     let appBundleID: String?
     let appName: String?
+    /// 播放器宿主 app 的 pid（「打开」按钮用它调度窗口）。nil = app 已不在运行——
+    /// 这种条目不进卡片：有音源就说明 app 开着，卡片上的一切动作都以它为前提
+    let pid: pid_t?
     let isPlaying: Bool
     let elapsed: Double?
     let duration: Double?
@@ -18,7 +21,13 @@ struct NowPlayingInfo {
 
     func setting(isPlaying: Bool) -> NowPlayingInfo {
         NowPlayingInfo(title: title, artist: artist, album: album, appBundleID: appBundleID,
-                       appName: appName, isPlaying: isPlaying, elapsed: elapsed,
+                       appName: appName, pid: pid, isPlaying: isPlaying, elapsed: elapsed,
+                       duration: duration, control: control)
+    }
+
+    func setting(pid: pid_t?) -> NowPlayingInfo {
+        NowPlayingInfo(title: title, artist: artist, album: album, appBundleID: appBundleID,
+                       appName: appName, pid: pid, isPlaying: isPlaying, elapsed: elapsed,
                        duration: duration, control: control)
     }
 }
@@ -29,28 +38,35 @@ enum ControlChannel {
     case mediaRemote
     /// app 不上报，靠系统媒体键控；能点到「当前在播的那个会话」即可
     case mediaKey
-    /// 有别的 app 同时在出声、又不是 owner，发了会误控别人，宁可不发
+    /// 控不到（既不上报也不是 owner）。展示对象已收敛为 owner（DEV-090），
+    /// 正常路径不再产出这个值，保留它是给 UI 的置灰判断和将来「只展示不可控」的场景
     case none
 }
 
-/// 灵动岛「正在播放」：双源合并。
+/// 灵动岛「正在播放」：以「系统媒体控制的路由目标（owner）」为唯一展示对象。
 ///
-/// 1. **系统 Now Playing**（MediaRemote 私有框架）：读取优先进程内 `MRNowPlayingRequest`
-///    类属性（macOS 15.4+ 后唯一未封的读取路径，对无自动化授权的进程开放；已实测），
-///    类不可用时降级 osascript JXA 子进程。这条源能拿到曲名/歌手/进度，也能发播放控制。
-/// 2. **CoreAudio 出声进程**（`AudioActivityMonitor`）：兜住那些压根不向系统上报的 app
-///    （QQ音乐、语音备忘录实测均不上报）。只能拿到 app 身份，曲名靠 AX 播放控制栏/窗口标题兜底，
-///    控制走系统媒体键。播放态一律以「系统混音有没有声音」为准（`AudioSpectrumMonitor.isAudible`），
+/// **核心不变式：卡片显示谁，播放/暂停就控谁**（DEV-090）。
+/// `MRMediaRemoteSendCommand` 和系统媒体键都只会路由给当前 now playing owner，
+/// 没有私有授权就无法定向到别的 app（DEV-078/081）——所以展示对象必须就是 owner。
+/// 曾经的「粘性 current」与此相反：卡片可以粘在 owner 之外的 app 上，按下去控到
+/// 的是别人（卡片是 QQ音乐、按钮动了 Chrome），已整体废弃。
+///
+/// 1. **owner 上报了元数据**（MediaRemote 私有框架，子进程读保证新鲜，DEV-082）：
+///    有曲名/歌手/进度，控制走 `MRMediaRemoteSendCommand`（dlsym）。
+/// 2. **owner 不上报**（QQ音乐这类只注册媒体键路由、不发布元数据的 app）：
+///    曲名靠 AX 播放控制栏/窗口标题兜底，控制走系统媒体键（路由目标同样是 owner）。
+///    播放态以「按 app 抓音频」的探针为准（`AppAudioProbe`），
 ///    因为 `IsRunningOutput` 在暂停后不保证归零。
 ///
-/// **展示对象是粘性的**：只有「有 app 新开播」或它退出才换人，暂停不换（`updateCurrent`）。
-/// 媒体键无法定向（DEV-081），卡片一旦切到别的 app 上按钮就控不到它了。
-/// 播放态由 `deriveIsPlaying` 一处判定，点击后先翻转图标再验证（`beginPendingToggle`）。
+/// 切换逻辑（对齐其他 mac 灵动岛）：新音源开播 → 系统把它设为 owner → 卡片跟过去；
+/// 音源关闭（app 退出/会话注销）→ owner 换人/落空 → 卡片换成新 owner 或清空；
+/// owner 不在白名单或已退出 = 没有可控目标，不出卡。
 ///
-/// **只认白名单**（`allowedBundles`）：两个来源都在入口过滤，别的 app 在出声/上报都不出卡。
-/// 过滤点必须三处齐全——出声哨兵、`actives`、`media`——漏一处就会有路径把非白名单 app 顶上来。
+/// **只认白名单**（`allowedBundles`）：owner 和出声列表都在入口过滤，白名单外的 app
+/// 占着路由时不出卡——显示了也控不到，违反核心不变式。
 ///
-/// 合并规则见 `read()`。播放控制走 `MRMediaRemoteSendCommand`（dlsym）。
+/// 合并规则见 `read()`。播放态由 `deriveIsPlaying` 一处判定，
+/// 点击后先翻转图标再验证（`beginPendingToggle`）。
 final class NowPlayingMonitor: ObservableObject {
     static let shared = NowPlayingMonitor()
 
@@ -77,6 +93,20 @@ final class NowPlayingMonitor: ObservableObject {
         return allowedBundles.contains { AudioActivityMonitor.sameApp(bundleID, $0) }
     }
 
+    /// bundleID 对应的**宿主 app**（卡片上「打开」按钮要激活的那个进程）。nil = 没在运行。
+    ///
+    /// 只认 `.regular` 进程并精确匹配优先：Chrome 的 helper 也是 `NSRunningApplication`，
+    /// 拿它的 pid 去激活窗口只会落空（而且 `sameApp` 前缀比对会把 helper 判成宿主）。
+    static func runningApp(bundleID: String?) -> NSRunningApplication? {
+        guard let bundleID else { return nil }
+        let apps = NSWorkspace.shared.runningApplications.filter {
+            !$0.isTerminated && $0.activationPolicy == .regular
+        }
+        if let exact = apps.first(where: { $0.bundleIdentifier == bundleID }) { return exact }
+        // 会话报的是 helper / WebKit 进程的 bundle 时，前缀归并到宿主
+        return apps.first { AudioActivityMonitor.sameApp($0.bundleIdentifier, bundleID) }
+    }
+
     enum Command: UInt {
         case togglePlay = 2
         case next = 4
@@ -91,38 +121,16 @@ final class NowPlayingMonitor: ObservableObject {
     /// 出声列表哨兵（0.3s），见 `checkActivity`
     private var activityTimer: Timer?
     private var lastActiveSet: Set<String> = []
-    /// 每个 app 最近一次「被操作」的时刻：进了出声列表（开始播），或上报会话的播放态翻转
-    /// （暂停→播放不改变出声列表，只能从 playbackRate 看出来）。卡片展示它最大的那个，
-    /// 也就是用户最后操作音频的那个 app（见 DEV-078）。
-    /// 只在轮询队列里读写。
-    private var operatedAt: [String: CFAbsoluteTime] = [:]
-    /// 上一次的出声列表 / 上报会话播放态，用来判「刚变化」
-    private var previousActives: Set<String> = []
-    private var lastMediaPlaying: [String: Bool] = [:]
-    /// 每个 app 上一次看到的上报内容（曲名 + 进度）。浏览器这种「暂停后槽和输出流都还占着」的
-    /// app，换一个视频时出声列表、owner、playbackRate 全都不变，只有曲名/进度会跳（见 DEV-078）
-    private var lastMediaIdentity: [String: (title: String?, elapsed: Double?)] = [:]
-    /// 混音刚静过。暂停后 app 常常仍占着输出流（出声列表不变、也不上报），
-    /// 只能靠「静→响」这一跳认出「刚有人点了播放」（见 DEV-078）。由主线程置位、队列消费
-    private var sawSilence = false
     private var inFlight = false
     private var staleCount = 0
+    /// 最近一次读取是不是「确定没有可控音源」（读成功、owner 为空），而不是「读失败」。
+    /// 前者可以立即清卡，后者要防抖。轮询队列写、主线程读，单个 Bool 无需加锁
+    private var lastReadDefinitiveEmpty = false
     /// 「混音有声但出声列表为空」的连续补查次数。进程注册只会比声音晚一拍，
     /// 连补 `emptyRetryLimit` 次还是空，说明响的是白名单外的 app——再补就是每轮白跑一次
     /// osascript 子进程（Safari 放视频时实测会一直触发）
     private var emptyRetries = 0
     private static let emptyRetryLimit = 3
-    /// 「当前播放器」：**粘性**状态，只有「有 app 新开播」或它退出才换人，暂停不换。
-    /// 暂停就换人会让卡片落到「媒体键控不到的 app」上——点暂停反而把上一个播放器拉起来，
-    /// 最后两个都在播（见 DEV-084）。只在轮询队列里读写。
-    private struct CurrentPlayer {
-        var pid: pid_t
-        var bundleID: String?
-        var name: String?
-        /// 被认定为当前播放器的时刻；只有 `operatedAt` 比它更晚的候选才能顶掉它
-        var at: CFAbsoluteTime
-    }
-    private var current: CurrentPlayer?
     /// 点击播放/暂停后的待确认意图：图标先翻转，再用「律动 + 出声列表」验证（见 DEV-085）。
     /// 只在主线程读写。
     private struct PendingToggle {
@@ -136,8 +144,8 @@ final class NowPlayingMonitor: ObservableObject {
     private var audioOnlyKey: String?
     /// 待确认窗口时长：够 0.3s 哨兵和 ≈0.1s 的电平把真实状态报上来
     private static let toggleWindow: TimeInterval = 1.6
-    /// 「按 app 抓音频」的探针当前对准哪个 pid（队列侧，避免每次轮询都往主线程塞 setTarget）
-    private var probeTargetPID: pid_t?
+    /// 「按 app 抓音频」的探针当前对准哪几个 app（队列侧，避免每次轮询都往主线程塞 setTargets）
+    private var probeTargets: Set<AppAudioProbe.Target> = []
     /// 面板开着才探测；关掉时不留一条空转的捕获流
     private var probeEnabled = false
     /// 上一次的日志摘要,只在内容变化时打,避免 2s 一条刷屏
@@ -185,11 +193,11 @@ final class NowPlayingMonitor: ObservableObject {
             .sink { [weak self] audible in self?.applyAudible(audible) }
             .store(in: &cancellables)
         // 按 app 抓到的电平：这才是「卡片上这个 app 停了没有」的唯一准信
-        // （系统混音是所有 app 的叠加，`IsRunningOutput` 暂停后不归零，见 DEV-086）
-        AppAudioProbe.shared.$isSounding
-            .removeDuplicates()
+        // （系统混音是所有 app 的叠加，`IsRunningOutput` 暂停后不归零，见 DEV-086）。
+        // 探针同时探出声列表里的**所有**候选，换人不再靠猜（DEV-089）
+        AppAudioProbe.shared.$levels
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] value in self?.applySounding(value) }
+            .sink { [weak self] _ in self?.applyLevels() }
             .store(in: &cancellables)
         // 调试开关:不依赖面板切到音乐模块,启动即开始轮询(ZEROFLOW_NOWPLAYING_DEBUG=1)
         if ProcessInfo.processInfo.environment["ZEROFLOW_NOWPLAYING_DEBUG"] == "1"
@@ -221,10 +229,7 @@ final class NowPlayingMonitor: ObservableObject {
             RunLoop.main.add(t, forMode: .common)
             timer = t
             startActivityWatcher()
-            // 面板刚打开：播放态锁存作废，按这一轮的真实信号重判。
-            // **不重挑展示对象**——面板是悬停 HUD，频繁开关；每次重开都按「谁在响」重挑
-            // 会让「暂停当前播放器、切个窗口」就跳卡（见 DEV-087）。
-            // 关着期间真的有人开播，靠 `previousActives` 还是旧集合这一条就能认出来（信号 1）
+            // 面板刚打开：播放态锁存作废，按这一轮的真实信号重判
             audioOnlyPlaying = nil
             audioOnlyKey = nil
             queue.async { [weak self] in
@@ -239,15 +244,13 @@ final class NowPlayingMonitor: ObservableObject {
             activityTimer?.invalidate()
             activityTimer = nil
             lastActiveSet = []
-            // 刻意不清 `operatedAt`/`previousActives`/`current`：面板关着的时候用户也可能换着播，
-            // 留着「上一次是谁」比每次重开都退回 owner 更贴近用户预期
             pendingToggle = nil
-            // 收起就停掉按 app 的音频探测，别留一条空转的捕获流
+            // 收起就停掉按 app 的音频探测，别留几条空转的捕获流
             queue.async { [weak self] in
                 self?.probeEnabled = false
-                self?.probeTargetPID = nil
+                self?.probeTargets = []
             }
-            AppAudioProbe.shared.setTarget(pid: nil, bundleID: nil)
+            AppAudioProbe.shared.setTargets([])
             nowPlaying = nil
             staleCount = 0
             lastDebugSummary = nil
@@ -307,40 +310,6 @@ final class NowPlayingMonitor: ObservableObject {
         nowPlaying = info.setting(isPlaying: value)
     }
 
-    /// 上报会话的轻量快照（几次 ObjC 属性读，微秒级）。哨兵拿它判「会话动没动」：
-    /// 出声列表可能一动不动，但曲名变了/播放态翻了都说明那边刚被操作过
-    struct SessionSnapshot: Equatable {
-        var owner: String?
-        var playing: Bool
-        var title: String?
-    }
-
-    static func sessionSnapshot() -> SessionSnapshot {
-        // owner 单独取：会话可能没有曲名（浏览器加载了页面但没播），
-        // 那时 owner 照样有值，不能因为读不到 item 就把 owner 一起丢了
-        var owner: String?
-        if let cls = requestClass,
-           cls.responds(to: Selector(("localNowPlayingPlayerPath"))),
-           let path = cls.value(forKey: "localNowPlayingPlayerPath") as? NSObject,
-           path.responds(to: Selector(("client"))),
-           let client = path.value(forKey: "client") as? NSObject,
-           client.responds(to: Selector(("bundleIdentifier"))) {
-            owner = client.value(forKey: "bundleIdentifier") as? String
-        }
-        guard let cls = requestClass,
-              cls.responds(to: Selector(("localNowPlayingItem"))),
-              let item = cls.value(forKey: "localNowPlayingItem") as? NSObject,
-              item.responds(to: Selector(("nowPlayingInfo"))),
-              let info = item.value(forKey: "nowPlayingInfo") as? [String: Any] else {
-            return SessionSnapshot(owner: owner, playing: false, title: nil)
-        }
-        // playbackRate 缺省按「在播」算：老会话不上报这个字段，当成暂停会把图标判反
-        let rate = (info["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? NSNumber)?.doubleValue
-        return SessionSnapshot(owner: owner,
-                               playing: rate.map { $0 != 0 } ?? true,
-                               title: info["kMRMediaRemoteNowPlayingInfoTitle"] as? String)
-    }
-
     private func tick() {
         guard !inFlight else {
             if Self.debug { ZSLog("NowPlaying: tick 跳过(inFlight)") }
@@ -389,12 +358,8 @@ final class NowPlayingMonitor: ObservableObject {
                 nowPlaying = info.setting(isPlaying: derived)
             }
         }
-        if audible {
-            if CFAbsoluteTimeGetCurrent() - lastTickAt > 0.5 { tick() }
-        } else {
-            // 记下「静过」：下一次读到的「响」就是刚有人点了播放，得算成一次操作（见 trackOperations）
-            queue.async { [weak self] in self?.sawSilence = true }
-        }
+        // 由静变响：可能有人刚开播、owner 要换人，别等下一个 2s 轮询才切过去
+        if audible, CFAbsoluteTimeGetCurrent() - lastTickAt > 0.5 { tick() }
     }
 
     /// 混音有没有声音；nil = 没在捕获，属于「不知道」
@@ -406,7 +371,8 @@ final class NowPlayingMonitor: ObservableObject {
     /// 播放态的**唯一**判定入口（主线程）。
     ///
     /// 优先级：① 按 app 抓到的电平（`AppAudioProbe`）——它直接回答「卡片上这个 app 现在有没有出声」，
-    /// 不受别的声源干扰，也不受 `IsRunningOutput` 暂停不归零的影响（DEV-086）；
+    /// 不受别的声源干扰，也不受 `IsRunningOutput` 暂停不归零的影响（DEV-086），
+    /// 而且探针覆盖出声列表里的**所有**候选，所以多音源下也是准的（DEV-089）；
     /// ② 上报型 app 的 `playbackRate`——那是它自己的状态；
     /// ③ 不上报的 app 用**锁存**（`audioOnlyLatch`），只认正向证据，不再用「混音有声 + 在出声列表里」
     /// 每次重推（暂停后仍占着输出流的 app 会一直被算成在播）。
@@ -425,11 +391,17 @@ final class NowPlayingMonitor: ObservableObject {
     ///
     /// 为什么不能每次重推：`IsRunningOutput` 在暂停后不保证归零，别的声源还在响时
     /// 「混音有声」也永远为真——两条叠起来就是「点了暂停，图标和律动还是没停」（DEV-086）。
-    /// 这里只认**正向证据**：混音彻底静下来、离开出声列表、静→响、点击意图、探针电平。
+    /// 这里只认**正向证据**：离开出声列表、混音彻底静下来、静→响、点击意图、探针电平。
     private func audioOnlyLatch(_ info: NowPlayingInfo, audible: Bool, inActives: Bool) -> Bool {
         if audioOnlyKey != info.appBundleID {
             audioOnlyKey = info.appBundleID
             audioOnlyPlaying = nil
+        }
+        // 离开出声列表 = 肯定没在输出（`IsRunningOutput` 只有假阳性、没有假阴性）。
+        // 这条比「混音静没静」可靠得多：多音源时混音永远是响的（DEV-079/089）
+        if !inActives {
+            audioOnlyPlaying = false
+            return false
         }
         if !audible {
             audioOnlyPlaying = false
@@ -437,14 +409,15 @@ final class NowPlayingMonitor: ObservableObject {
         }
         if let latched = audioOnlyPlaying { return latched }
         // 刚换人、还没任何证据：先按出声列表给个初值
-        audioOnlyPlaying = inActives
-        return inActives
+        audioOnlyPlaying = true
+        return true
     }
 
-    /// 探针电平变化：直接改卡片状态，不等 2s 轮询（暂停 0.3s 内图标和律动就一起停）
-    private func applySounding(_ value: Bool?) {
-        guard timer != nil, let value, let info = nowPlaying,
-              AppAudioProbe.shared.sounding(for: info.appBundleID) == value else { return }
+    /// 探针电平变化：直接改卡片状态，不等 2s 轮询（暂停 0.3s 内图标和律动就一起停）。
+    /// 只有卡片上这个 app 的电平才算数——别的候选在响/静了不该动卡片
+    private func applyLevels() {
+        guard timer != nil, let info = nowPlaying else { return }
+        guard let value = AppAudioProbe.shared.sounding(for: info.appBundleID) else { return }
         audioOnlyKey = info.appBundleID
         audioOnlyPlaying = value
         if let p = pendingToggle, AudioActivityMonitor.sameApp(p.bundleID, info.appBundleID) {
@@ -459,6 +432,13 @@ final class NowPlayingMonitor: ObservableObject {
         if info.isPlaying != value {
             if Self.debug { ZSLog("NowPlaying: 探针 \(value ? "有声" : "静音") → \(info.appBundleID ?? "-")") }
             nowPlaying = info.setting(isPlaying: value)
+        }
+        // 卡片上的 app 刚静了、而别的候选在响：owner 可能要换人，立刻补查一次，
+        // 不主动催就要等最多 2s 才挪过去
+        if !value, AppAudioProbe.shared.soundingBundleIDs.contains(where: {
+            !AudioActivityMonitor.sameApp($0, info.appBundleID)
+        }) {
+            tick()
         }
     }
 
@@ -478,41 +458,49 @@ final class NowPlayingMonitor: ObservableObject {
             nowPlaying = out
             staleCount = 0
         } else if nowPlaying != nil {
+            // 规则 3：展示对象已退出（音源关闭），或系统确定已没有可控音源 → 立刻清卡，
+            // 不吃防抖；其余读空只是子进程抖动，按防抖处理免得卡片闪空
+            let displayedAppDead = nowPlaying
+                .flatMap { $0.appBundleID }
+                .map { Self.runningApp(bundleID: $0) == nil } ?? false
             staleCount += 1
-            if staleCount >= Self.staleLimit {
+            if displayedAppDead || lastReadDefinitiveEmpty || staleCount >= Self.staleLimit {
                 nowPlaying = nil
                 staleCount = 0
             }
         }
     }
 
-    // MARK: - 合并两个数据源
+    // MARK: - 选出展示对象
 
-    /// 合并顺序（越靠前越优先）：
-    /// 1. **粘性当前播放器**（`updateCurrent`，DEV-084）：只要它还在跑就由它出卡，
-    ///    哪怕已经暂停——暂停就换人会让卡片落到「媒体键控不到的 app」上；
-    /// 2. 它同时有上报会话时用会话信息（曲名/进度更全）；
-    /// 3. 都没有才退到暂停态的会话。
+    /// 展示对象 = **系统媒体控制的路由目标（owner）**，别无候选（DEV-090）。
+    ///
+    /// 为什么只能是它：`MRMediaRemoteSendCommand` 和系统媒体键都路由给 owner，无法定向
+    /// （DEV-081）。卡片若显示 owner 之外的 app，播放/暂停按下去动的就是别人——这正是
+    /// 要修的问题。反过来只显示 owner，「显示谁、控谁」就由构造保证，不需要任何折中。
+    /// 切换也随之简单：新音源开播 → 系统把它设为 owner → 卡片跟过去；音源关闭 →
+    /// owner 换人/落空 → 卡片换成新 owner 或清空（规则 3/4）。
+    ///
     /// - Parameter audible: 系统混音当前有没有声音；nil = 没在捕获，属于「不知道」，
     ///   此时不能判暂停。出声列表非空但没声音 = app 只是占着输出流（QQ音乐暂停后
     ///   `IsRunningOutput` 不归零），要按「已暂停」展示
     private func read(audible: Bool?) -> NowPlayingInfo? {
         // 会话必须走子进程读：进程内的 `MRNowPlayingRequest` 属性**冻结在首次读取**
         // （实测 app 退出 12s 后长跑进程还报它的 bundleID，新进程立刻正确），
-        // 而 C 接口在这版 macOS 上被阉（PID 恒 0、DisplayID 恒 nil），见 DEV-082
-        let rawMedia = readNowPlaying()
-        // 白名单：非白名单 app 的上报会话直接丢弃。不丢的话 `current` 为空时
-        // 会退到「暂停态会话」那条分支直接出卡（Safari/语音备忘录都会走到这里）
-        let media = rawMedia.flatMap { Self.isAllowed($0.appBundleID) ? $0 : nil }
-        // owner 就用会话自己报的 bundleID——它和媒体键的目标是同一个，而且比单独再查一次省事
-        let owner = media?.appBundleID ?? Self.nowPlayingOwnerBundleID()
+        // 而 C 接口在这版 macOS 上被阉（PID 恒 0、DisplayID 恒 nil），见 DEV-082。
+        // 两条路都读不到 = 「不知道」，不能当成「没有音源」去清卡
+        guard let session = readSession() else {
+            lastReadDefinitiveEmpty = false
+            logIfChanged("read 失败（子进程 + 进程内都没结果）")
+            return nil
+        }
+        // owner 优先用 playerPath 的 client；条目在、client 读不到时用条目的 bundleID 兜
+        let owner = session.owner ?? session.media?.appBundleID
         let rawActives = AudioActivityMonitor.activeApps(owner: owner)
         let actives = rawActives.filter { Self.isAllowed($0.bundleID) }
-        logBlocked(rawMedia, media: media, rawActives: rawActives, actives: actives)
+        logBlocked(session.media, rawActives: rawActives, actives: actives)
         logActives(actives, owner: owner, audible: audible)
-        trackOperations(actives: actives, media: media, owner: owner, audible: audible)
-        updateCurrent(actives, media: media, owner: owner)
-        syncProbeTarget()
+        syncProbeTargets(actives)
 
         // 有声但还没认出是谁在出声（进程注册比声音晚一拍）：马上补查一次，
         // 不然要等下一个 2s 轮询，体感就是「浏览器切回 QQ音乐很慢」。
@@ -527,129 +515,60 @@ final class NowPlayingMonitor: ObservableObject {
             emptyRetries = 0
         }
 
-        if let cur = current {
-            if let media, AudioActivityMonitor.sameApp(media.appBundleID, cur.bundleID) {
-                logIfChanged("media app=\(media.appBundleID ?? "-")（当前播放器）")
-                return media
-            }
-            if let info = audioOnlyInfo(cur, actives: actives, audible: audible) {
-                return info
-            }
-        }
-
-        if let media {
-            logIfChanged("media(paused) app=\(media.appBundleID ?? "-")")
-            return media
-        }
-        logIfChanged("idle owner=\(owner ?? "-")")
-        return nil
-    }
-
-    /// 维护「当前播放器」。**只有比它更晚的「开播信号」才能顶掉它**：
-    /// 暂停、退出出声列表都不换人——媒体键只会落到最后开播的那个 app 上，
-    /// 卡片一旦跟着声音跑到别人身上，按钮就控不到卡片上的人了（DEV-081/084）。
-    private func updateCurrent(_ actives: [AudioActivity], media: NowPlayingInfo?, owner: String?) {
-        let now = CFAbsoluteTimeGetCurrent()
-        // 当前播放器退出了，或者不在白名单（改白名单前认下的残留）：让位
-        if let cur = current, livePID(for: cur) == nil || !Self.isAllowed(cur.bundleID) {
-            current = nil
-        }
-
-        // 出声列表里「最后被操作」的那个（时间戳相同按数组顺序，owner/媒体类在前，别用不稳定排序）
-        let ranked = actives.enumerated().sorted { lhs, rhs in
-            let l = operatedAt[lhs.element.bundleID ?? ""] ?? 0
-            let r = operatedAt[rhs.element.bundleID ?? ""] ?? 0
-            return l == r ? lhs.offset < rhs.offset : l > r
-        }.map(\.element)
-        let best = ranked.first
-        let bestAt = best.flatMap { operatedAt[$0.bundleID ?? ""] } ?? 0
-
-        if let cur = current {
-            if let best, bestAt > cur.at {
-                current = CurrentPlayer(pid: best.pid, bundleID: best.bundleID, name: best.name, at: bestAt)
-                if Self.debug { ZSLog("NowPlaying: current \(cur.bundleID ?? "-") → \(best.bundleID ?? "-")（新开播）") }
-            } else if let best, AudioActivityMonitor.sameApp(best.bundleID, cur.bundleID) {
-                // 它自己又被操作了：刷新时间戳和身份，别被更旧的记录顶掉
-                current = CurrentPlayer(pid: best.pid, bundleID: best.bundleID, name: best.name,
-                                        at: max(cur.at, bestAt))
-            }
-            logCurrent(actives)
-            return
-        }
-
-        // 还没有当前播放器：最后被操作的出声方 → owner → 正在播的上报会话
-        if let best {
-            current = CurrentPlayer(pid: best.pid, bundleID: best.bundleID, name: best.name,
-                                    at: bestAt > 0 ? bestAt : now)
-        } else if let owner, let owned = actives.first(where: { AudioActivityMonitor.sameApp($0.bundleID, owner) }) {
-            current = CurrentPlayer(pid: owned.pid, bundleID: owned.bundleID, name: owned.name, at: now)
-        } else if let media, let bid = media.appBundleID, media.isPlaying,
-                  let app = NSWorkspace.shared.runningApplications.first(where: {
-                      !$0.isTerminated && AudioActivityMonitor.sameApp($0.bundleIdentifier, bid)
-                  }) {
-            current = CurrentPlayer(pid: app.processIdentifier, bundleID: bid,
-                                    name: app.localizedName, at: now)
-        }
-        if Self.debug, let cur = current {
-            ZSLog("NowPlaying: current=\(cur.bundleID ?? "?")（初始）")
-        }
-        logCurrent(actives)
-    }
-
-    /// 排查「为什么显示的是它」：每个候选距今多久被记成「刚被操作」
-    private func logCurrent(_ actives: [AudioActivity]) {
-        guard Self.debug, let cur = current else { return }
-        let now = CFAbsoluteTimeGetCurrent()
-        let ages = actives.map { a -> String in
-            let bid = a.bundleID ?? "?"
-            let age = operatedAt[bid].map { String(format: "%.1fs", now - $0) } ?? "从未"
-            return "\(bid)=\(age)"
-        }.joined(separator: " ")
-        ZSLog("NowPlaying: current=\(cur.bundleID ?? "?") [\(ages)]")
-    }
-
-    /// 让「按 app 抓音频」的探针对准当前播放器。只在换人时重建捕获流（队列侧判重，别每轮都塞主线程）
-    private func syncProbeTarget() {
-        let want = probeEnabled ? current.flatMap { livePID(for: $0) } : nil
-        guard want != probeTargetPID else { return }
-        probeTargetPID = want
-        let bid = current?.bundleID
-        DispatchQueue.main.async {
-            AppAudioProbe.shared.setTarget(pid: want, bundleID: bid)
-        }
-    }
-
-    /// 当前播放器还活着的 pid。app 重启过（pid 变了）就按 bundleID 重新认一次
-    private func livePID(for cur: CurrentPlayer) -> pid_t? {
-        if let app = NSRunningApplication(processIdentifier: cur.pid), !app.isTerminated {
-            return cur.pid
-        }
-        guard let bid = cur.bundleID,
-              let app = NSWorkspace.shared.runningApplications.first(where: {
-                  !$0.isTerminated && AudioActivityMonitor.sameApp($0.bundleIdentifier, bid)
-              }) else { return nil }
-        return app.processIdentifier
-    }
-
-    /// CoreAudio 兜底来源：曲名读 AX 播放控制栏，读不到退回窗口标题
-    private func audioOnlyInfo(_ cur: CurrentPlayer,
-                               actives: [AudioActivity],
-                               audible: Bool?) -> NowPlayingInfo? {
-        guard let pid = livePID(for: cur) else {
-            current = nil
+        // 白名单 + 存活校验：owner 不在白名单 = 媒体键会路由给白名单外的 app，
+        // 显示谁都控不到，宁可不出卡（核心不变式）；owner 已退出（会话残留）同理，
+        // 卡片上的「打开」按钮和媒体控制都以 app 在跑为前提。
+        // 「确实没有 owner」是确定状态（音源全关了），可以立即清卡；owner 存在但不可用时
+        // 仍走防抖，免得白名单外的 app 在响时 owner 反复横跳让卡片闪
+        guard let owner, Self.isAllowed(owner),
+              let app = Self.runningApp(bundleID: owner) else {
+            lastReadDefinitiveEmpty = (owner == nil)
+            logIfChanged("idle owner=\(owner ?? "-")")
             return nil
         }
+        lastReadDefinitiveEmpty = false
+
+        // owner 上报了元数据：用会话信息（曲名/进度/播放态更全），控制走 MR 命令
+        if let media = session.media, AudioActivityMonitor.sameApp(media.appBundleID, owner) {
+            logIfChanged("media app=\(media.appBundleID ?? "-")（owner）")
+            return media.setting(pid: app.processIdentifier)
+        }
+
+        // owner 不上报（QQ音乐）：身份用 AX/窗口标题兜底，控制走系统媒体键
+        return audioOnlyInfo(owner: owner, app: app, actives: actives, audible: audible)
+    }
+
+    /// 让「按 app 抓音频」的探针对准**出声列表里的所有候选**（白名单最多 3 个）。
+    /// 探针用来回答「卡片上这个 app 停了没有」（`deriveIsPlaying`）；
+    /// 只在目标集合变化时重建捕获流（队列侧判重，别每轮都塞主线程）
+    private func syncProbeTargets(_ actives: [AudioActivity]) {
+        let wanted = probeEnabled
+            ? Set(actives.compactMap { a in a.bundleID.map { AppAudioProbe.Target(pid: a.pid, bundleID: $0) } })
+            : []
+        guard wanted != probeTargets else { return }
+        probeTargets = wanted
+        let targets = Array(wanted)
+        DispatchQueue.main.async {
+            AppAudioProbe.shared.setTargets(targets)
+        }
+    }
+
+    /// owner 不上报元数据时的兜底卡：曲名读 AX 播放控制栏，读不到退回窗口标题。
+    /// owner 就是媒体键的路由目标，所以「卡片上是谁，点下去就控谁」，按钮不用置灰（DEV-090）
+    private func audioOnlyInfo(owner: String, app: NSRunningApplication,
+                               actives: [AudioActivity],
+                               audible: Bool?) -> NowPlayingInfo? {
+        let pid = app.processIdentifier
         let axInfo = AXMediaInfoReader.read(pid: pid)
-        let title = axInfo?.title ?? WindowTitleReader.title(forPID: pid, appName: cur.name)
-        // 卡片上是谁，点下去就控谁（媒体键路由给最后开播的那个 app，正是卡片上的这个），
-        // 所以按钮不用置灰
-        logIfChanged("audio-only app=\(cur.bundleID ?? "-") title=\(title ?? "nil") n=\(actives.count) audible=\(audible.map { "\($0)" } ?? "-")")
+        let title = axInfo?.title ?? WindowTitleReader.title(forPID: pid, appName: app.localizedName)
+        logIfChanged("audio-only app=\(owner) title=\(title ?? "nil") n=\(actives.count) audible=\(audible.map { "\($0)" } ?? "-")")
         return NowPlayingInfo(
             title: title,
             artist: axInfo?.artist,
             album: nil,
-            appBundleID: cur.bundleID,
-            appName: cur.name,
+            appBundleID: owner,
+            appName: app.localizedName,
+            pid: pid,
             // 它在出声列表里不代表在响：暂停后仍可能占着输出流，以「有没有声音」为准
             isPlaying: audible ?? true,
             elapsed: nil,
@@ -658,54 +577,21 @@ final class NowPlayingMonitor: ObservableObject {
         )
     }
 
-    /// 读「系统 Now Playing」。子进程优先（唯一能拿到新鲜值的路径，~77ms，跑在轮询队列上），
-    /// 失败再退回进程内——进程内的值虽然会冻结，但比什么都没有强
-    private func readNowPlaying() -> NowPlayingInfo? {
-        if let fresh = readViaSubprocess() { return fresh }
-        return useSubprocess ? nil : readInProcess()
+    /// 一次会话读取的结果。两者要分开：QQ音乐这类 app 只注册媒体键路由、不发布元数据——
+    /// 它是 owner（媒体键会路由给它），但 `localNowPlayingItem` 是 nil
+    private struct SessionRead {
+        /// 当前 now playing owner 的 bundleID（媒体键/MR 命令的路由目标）
+        var owner: String?
+        /// owner 上报的条目（曲名/进度等）；没上报为 nil
+        var media: NowPlayingInfo?
     }
 
-    /// 记录「谁刚被操作」。四个信号，缺一个就会有一个方向切不过去：
-    /// 1. 新进出声列表 —— 开始播（暂停后进程消失的 app 走这条，QQ音乐就是）；
-    /// 2. 上报会话 playbackRate 由停转播 —— 暂停后仍占着槽的 app（浏览器）走这条；
-    /// 3. 混音由静变响且只有一个候选 —— 暂停后仍占着输出流的 app 走这条（它既不在 1 也不在 2）；
-    /// 4. 上报内容换了一条且正在播（曲名变）—— 槽和输出流都没动静时，只有这里看得出来
-    ///
-    /// **刻意不认「会话 owner 换人」**：owner 只表示谁占着会话槽，切窗口、把浏览器点到前台
-    /// 都会让它换人（会话重新注册），但那不是「谁开始播了」。按它记账就会出现
-    /// 「只是切了个窗口，卡片就从 QQ音乐跳到浏览器，而按钮还在控 QQ」（见 DEV-087）。
-    /// 浏览器真的开始播时，出声列表（信号 1）或 playbackRate（信号 2）一定会动，不需要它。
-    private func trackOperations(actives: [AudioActivity], media: NowPlayingInfo?,
-                                 owner: String?, audible: Bool?) {
-        let now = CFAbsoluteTimeGetCurrent()
-        let live = Set(actives.compactMap { $0.bundleID })
-
-        // 1) 新进出声列表
-        for bid in live where !previousActives.contains(bid) { operatedAt[bid] = now }
-        previousActives = live
-
-        // 2) 上报会话由停转播（同一个 app 自己暂停再播，owner 不变）
-        if let media, let bid = media.appBundleID {
-            if lastMediaPlaying[bid] == false, media.isPlaying { operatedAt[bid] = now }
-            lastMediaPlaying[bid] = media.isPlaying
-
-            // 4) 会话换了一条且正在播：换了首歌或新开了个视频。
-            // 只认「曲名变了」——进度跳回 0 在会话重新注册时也会出现（切窗口就够触发），
-            // 而暂停中的会话改标题也不是「开始播」
-            if media.isPlaying, let prev = lastMediaIdentity[bid],
-               let t = media.title, let pt = prev.title, t != pt {
-                operatedAt[bid] = now
-            }
-            lastMediaIdentity[bid] = (media.title, media.elapsed)
-        }
-
-        // 4) 静→响且只有一个候选：必然是它。多候选时**不猜**——猜错就是「卡片显示 A、
-        // 实际响的是 B」，比不动更糟（见 DEV-079/080）
-        if audible == true, sawSilence {
-            sawSilence = false
-            if actives.count == 1, let bid = actives[0].bundleID { operatedAt[bid] = now }
-        }
-        operatedAt = operatedAt.filter { live.contains($0.key) }
+    /// 读「系统 Now Playing」。子进程优先（唯一能拿到新鲜值的路径，~77ms，跑在轮询队列上），
+    /// 失败再退回进程内——进程内的值虽然会冻结，但比什么都没有强。
+    /// 返回 nil = 两条路都读不到（「不知道」），调用方不能把它当成「没有音源」
+    private func readSession() -> SessionRead? {
+        if let fresh = readViaSubprocess() { return fresh }
+        return useSubprocess ? nil : readInProcess()
     }
 
     /// 出声了但还没认出是谁（进程注册比声音晚一拍）时的补查间隔；nil = 刚查过，别再查
@@ -716,11 +602,6 @@ final class NowPlayingMonitor: ObservableObject {
         return 0.25
     }
 
-    /// 当前 now playing owner 的 bundleID（媒体键会路由给它）
-    static func nowPlayingOwnerBundleID() -> String? {
-        sessionSnapshot().owner
-    }
-
     private func logIfChanged(_ summary: String) {
         guard Self.debug, summary != lastDebugSummary else { return }
         lastDebugSummary = summary
@@ -728,15 +609,10 @@ final class NowPlayingMonitor: ObservableObject {
     }
 
     /// 白名单挡掉了谁：只在变化时打。排查「明明在放歌但卡片是空的」时，先看这条
-    private func logBlocked(_ rawMedia: NowPlayingInfo?, media: NowPlayingInfo?,
+    private func logBlocked(_ media: NowPlayingInfo?,
                             rawActives: [AudioActivity], actives: [AudioActivity]) {
         guard Self.debug else { return }
-        let mediaSummary: String
-        if let rawMedia, media == nil {
-            mediaSummary = rawMedia.appBundleID ?? "?"
-        } else {
-            mediaSummary = "-"
-        }
+        let mediaSummary = media.flatMap { Self.isAllowed($0.appBundleID) ? nil : ($0.appBundleID ?? "?") } ?? "-"
         let activesSummary = rawActives
             .filter { !Self.isAllowed($0.bundleID) }
             .map { $0.bundleID ?? "?" }
@@ -759,29 +635,48 @@ final class NowPlayingMonitor: ObservableObject {
     // MARK: - 发送播放控制
 
     func send(_ command: Command) {
-        guard let info = nowPlaying else { return }
-        // 诊断：媒体键只会落到 now playing owner 身上。卡片上是谁、owner 是谁，两者不一致时
-        // 按下去就会控到别的 app（浏览器占着槽是最常见的），先把这对值打出来，别靠猜
-        if Self.debug {
-            let owner = Self.nowPlayingOwnerBundleID()
-            let mismatch = !AudioActivityMonitor.sameApp(owner, info.appBundleID)
-            ZSLog("NowPlaying: send \(command) card=\(info.appBundleID ?? "-") owner=\(owner ?? "-")\(mismatch ? " ⚠️不一致" : "")")
+        guard let info = nowPlaying, info.control != .none else { return }
+        // 发送前核对一次路由目标（核心不变式的最后一道闸）：卡片是从 owner 派生的，
+        // 不一致只可能是这一两秒内 owner 换人了（另一个 app 刚开播）。这时发出去控到的是别人，
+        // 宁可这一下不发，先把卡片刷成新的。核对走子进程（~80ms，异步，按钮不会卡）
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let freshOwner = self.readViaSubprocess()?.owner
+            DispatchQueue.main.async {
+                if let freshOwner, !AudioActivityMonitor.sameApp(freshOwner, info.appBundleID) {
+                    if Self.debug {
+                        ZSLog("NowPlaying: send \(command) 放弃 card=\(info.appBundleID ?? "-") owner=\(freshOwner)（路由目标已换人）")
+                    }
+                    self.tick()
+                    return
+                }
+                self.perform(command, on: info)
+            }
+        }
+    }
+
+    /// 真正发命令。调用前已确认 `info` 就是当前路由目标
+    private func perform(_ command: Command, on info: NowPlayingInfo) {
+        // 核对期间卡片可能已经被轮询换掉了：换了就按新卡片来，别按旧对象发
+        guard let cur = nowPlaying, AudioActivityMonitor.sameApp(cur.appBundleID, info.appBundleID) else {
+            tick()
+            return
         }
         // 播放/暂停：先把图标翻过去，再让电平/出声列表验证（DEV-085）。
-        // 只翻 togglePlay——上一首/下一首不改变播放态。放在通道判断之后，
-        // 发不出去（符号没找到 / .none）就别翻，免得图标闪一下又退回去
-        switch info.control {
+        // 只翻 togglePlay——上一首/下一首不改变播放态。基线用 `cur`（最新状态），
+        // 不用点击那一刻的 `info`，否则核对期间落地的轮询结果会被旧值覆盖
+        switch cur.control {
         case .mediaRemote:
             guard let fn = sendCommandFn else { return }
-            if command == .togglePlay { beginPendingToggle(for: info) }
+            if command == .togglePlay { beginPendingToggle(for: cur) }
             fn(UInt32(command.rawValue), nil)
         case .mediaKey:
-            if command == .togglePlay { beginPendingToggle(for: info) }
+            if command == .togglePlay { beginPendingToggle(for: cur) }
             MediaKey.post(Self.mediaKey(for: command))
         case .none:
             return
         }
-        if Self.debug { ZSLog("NowPlaying: sent \(command) via \(info.control)") }
+        if Self.debug { ZSLog("NowPlaying: sent \(command) via \(cur.control)") }
         // 发送后补查：0.2s 让媒体键落地，0.6/1.2s 兜住反应慢的 app（inFlight 会挡掉重叠的）
         for delay in [0.2, 0.6, 1.2] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.tick() }
@@ -824,16 +719,11 @@ final class NowPlayingMonitor: ObservableObject {
 
     // MARK: - 读取:进程内 MRNowPlayingRequest
 
-    private func readInProcess() -> NowPlayingInfo? {
-        guard let cls = Self.requestClass else { return nil }
-        guard cls.responds(to: Selector(("localNowPlayingItem"))) else { return nil }
-        guard let item = cls.value(forKey: "localNowPlayingItem") as? NSObject else { return nil }
-        guard item.responds(to: Selector(("nowPlayingInfo"))),
-              let info = item.value(forKey: "nowPlayingInfo") as? [String: Any] else { return nil }
-        guard let title = string(info, "kMRMediaRemoteNowPlayingInfoTitle") else { return nil }
-
+    private func readInProcess() -> SessionRead {
+        guard let cls = Self.requestClass else { return SessionRead(owner: nil, media: nil) }
+        // owner 单独取：QQ音乐这类 app 只注册媒体键路由、没有条目，owner 照样有值
+        var owner: String?
         var appName: String?
-        var appBundleID: String?
         if cls.responds(to: Selector(("localNowPlayingPlayerPath"))),
            let path = cls.value(forKey: "localNowPlayingPlayerPath") as? NSObject,
            path.responds(to: Selector(("client"))),
@@ -842,26 +732,36 @@ final class NowPlayingMonitor: ObservableObject {
                 appName = client.value(forKey: "displayName") as? String
             }
             if client.responds(to: Selector(("bundleIdentifier"))) {
-                appBundleID = client.value(forKey: "bundleIdentifier") as? String
+                owner = client.value(forKey: "bundleIdentifier") as? String
             }
         }
-        if appName == nil, let bid = appBundleID {
+        guard cls.responds(to: Selector(("localNowPlayingItem"))),
+              let item = cls.value(forKey: "localNowPlayingItem") as? NSObject,
+              item.responds(to: Selector(("nowPlayingInfo"))),
+              let info = item.value(forKey: "nowPlayingInfo") as? [String: Any],
+              let title = string(info, "kMRMediaRemoteNowPlayingInfoTitle") else {
+            return SessionRead(owner: owner, media: nil)
+        }
+        if appName == nil, let bid = owner {
             appName = NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bid }?.localizedName
         }
 
         let rate = double(info, "kMRMediaRemoteNowPlayingInfoPlaybackRate")
         let isPlaying = rate.map { $0 != 0 } ?? true
-        return NowPlayingInfo(
+        let media = NowPlayingInfo(
             title: title,
             artist: string(info, "kMRMediaRemoteNowPlayingInfoArtist"),
             album: string(info, "kMRMediaRemoteNowPlayingInfoAlbum"),
-            appBundleID: appBundleID,
+            appBundleID: owner,
             appName: appName,
+            // pid 由 `read()` 统一补：那里才做白名单 + 存活校验
+            pid: nil,
             isPlaying: isPlaying,
             elapsed: double(info, "kMRMediaRemoteNowPlayingInfoElapsedTime"),
             duration: double(info, "kMRMediaRemoteNowPlayingInfoDuration"),
             control: .mediaRemote
         )
+        return SessionRead(owner: owner, media: media)
     }
 
     private func string(_ info: [String: Any], _ key: String) -> String? {
@@ -874,26 +774,35 @@ final class NowPlayingMonitor: ObservableObject {
 
     // MARK: - 读取:osascript JXA 子进程(降级路径)
 
-    private func readViaSubprocess() -> NowPlayingInfo? {
+    /// 子进程输出格式（`␟` 分隔）：ownerBundleID ␟ 曲名 ␟ 歌手 ␟ 专辑 ␟ 条目bundleID ␟
+    /// app 名 ␟ 时长 ␟ 进度 ␟ playbackRate。
+    /// **owner 和条目必须分两段读**：QQ音乐是 owner 但没有条目，旧格式在 `NOITEM` 处
+    /// 直接返回，owner 跟着丢了——卡片于是靠粘性记忆猜，控谁全凭运气（DEV-090）
+    private func readViaSubprocess() -> SessionRead? {
         guard let out = Self.runJXA() else { return nil }
         let parts = out.trimmingCharacters(in: .whitespacesAndNewlines)
             .split(separator: "\u{241F}", omittingEmptySubsequences: false)
-        guard parts.count >= 8, !parts[0].isEmpty, parts[0] != "NOCLASS", parts[0] != "NOITEM" else { return nil }
+        guard parts.count >= 9, parts[0] != "NOCLASS" else { return nil }
+        let owner = parts[0].isEmpty ? nil : String(parts[0])
         let num = { (s: Substring) -> Double? in
             let t = s.trimmingCharacters(in: .whitespaces)
             return t.isEmpty ? nil : Double(t)
         }
-        return NowPlayingInfo(
-            title: String(parts[0]),
-            artist: parts[1].isEmpty ? nil : String(parts[1]),
-            album: parts[2].isEmpty ? nil : String(parts[2]),
-            appBundleID: parts[3].isEmpty ? nil : String(parts[3]),
-            appName: parts[4].isEmpty ? nil : String(parts[4]),
-            isPlaying: num(parts[7]).map { $0 != 0 } ?? true,
-            elapsed: num(parts[6]),
-            duration: num(parts[5]),
+        let title = parts[1].trimmingCharacters(in: .whitespaces)
+        let media = title.isEmpty ? nil : NowPlayingInfo(
+            title: title,
+            artist: parts[2].isEmpty ? nil : String(parts[2]),
+            album: parts[3].isEmpty ? nil : String(parts[3]),
+            // 条目自己的 bundleID 读不到时归到 owner 名下，否则 `read()` 的归属校验会失配
+            appBundleID: parts[4].isEmpty ? owner : String(parts[4]),
+            appName: parts[5].isEmpty ? nil : String(parts[5]),
+            pid: nil,
+            isPlaying: num(parts[8]).map { $0 != 0 } ?? true,
+            elapsed: num(parts[7]),
+            duration: num(parts[6]),
             control: .mediaRemote
         )
+        return SessionRead(owner: owner, media: media)
     }
 
     private static func runJXA() -> String? {
@@ -925,20 +834,33 @@ final class NowPlayingMonitor: ObservableObject {
       var loaded = b.load;
       var cls = $.NSClassFromString('MRNowPlayingRequest');
       if (cls.isNil()) return 'NOCLASS';
-      var item = cls.localNowPlayingItem;
-      if (item.isNil()) return 'NOITEM';
-      var info = item.nowPlayingInfo;
-      if (info.isNil()) return 'NOINFO';
-      var t = info.valueForKey('kMRMediaRemoteNowPlayingInfoTitle');
-      if (t.isNil() || !t.js.length) return '';
-      var app = '', bid = '';
+      function s(v) { return (v && !v.isNil() && typeof v.js !== 'undefined') ? String(v.js) : ''; }
+      // owner（媒体键的路由目标）先取：QQ音乐这类 app 只注册路由、没有条目，
+      // 它才是「按下去会控到谁」的答案，不能因为 item 是 nil 就丢掉
+      var owner = '';
       try {
+        var pc = cls.localNowPlayingPlayerPath.client;
+        owner = pc.bundleIdentifier && !pc.bundleIdentifier.isNil() ? pc.bundleIdentifier.js : '';
+      } catch (e) {}
+      var t = '', artist = '', album = '', bid = '', app = '', dur = '', ela = '', rate = '';
+      try {
+        var item = cls.localNowPlayingItem;
+        if (!item.isNil()) {
+          var info = item.nowPlayingInfo;
+          if (!info.isNil()) {
+            t = s(info.valueForKey('kMRMediaRemoteNowPlayingInfoTitle'));
+            artist = s(info.valueForKey('kMRMediaRemoteNowPlayingInfoArtist'));
+            album = s(info.valueForKey('kMRMediaRemoteNowPlayingInfoAlbum'));
+            dur = s(info.valueForKey('kMRMediaRemoteNowPlayingInfoDuration'));
+            ela = s(info.valueForKey('kMRMediaRemoteNowPlayingInfoElapsedTime'));
+            rate = s(info.valueForKey('kMRMediaRemoteNowPlayingInfoPlaybackRate'));
+          }
+        }
         var c = cls.localNowPlayingPlayerPath.client;
         app = c.displayName && !c.displayName.isNil() ? c.displayName.js : '';
-        bid = c.bundleIdentifier && !c.bundleIdentifier.isNil() ? c.bundleIdentifier.js : '';
+        bid = s(c.bundleIdentifier);
       } catch (e) {}
-      function s(v) { return (v && !v.isNil() && typeof v.js !== 'undefined') ? String(v.js) : ''; }
-      return [t.js, s(info.valueForKey('kMRMediaRemoteNowPlayingInfoArtist')), s(info.valueForKey('kMRMediaRemoteNowPlayingInfoAlbum')), bid, app, s(info.valueForKey('kMRMediaRemoteNowPlayingInfoDuration')), s(info.valueForKey('kMRMediaRemoteNowPlayingInfoElapsedTime')), s(info.valueForKey('kMRMediaRemoteNowPlayingInfoPlaybackRate'))].join('␟');
+      return [owner, t, artist, album, bid, app, dur, ela, rate].join('␟');
     }
     """
 }

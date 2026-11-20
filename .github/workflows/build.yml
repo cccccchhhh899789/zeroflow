@@ -19,12 +19,23 @@ concurrency:
 
 jobs:
 
-  # Build the app on macOS.
+  # Build the app on macOS for three targets: arm64, x86_64 and universal.
   # push/PR -> compile check + app zip artifact (for manual testing)
   # tag v*  -> ad-hoc signed Release build -> DMG -> artifact for the release job
   build:
-    name: Build (macOS)
+    name: Build (macOS, ${{ matrix.arch }})
     runs-on: macos-latest
+    strategy:
+      # 三个架构互相独立，一个挂了不影响另外两个的产出
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            archs: arm64
+          - arch: x86_64
+            archs: x86_64
+          # - arch: universal
+          #   archs: "arm64 x86_64"
 
     steps:
       - name: Checkout
@@ -77,7 +88,7 @@ jobs:
             CODE_SIGN_IDENTITY="$CS_IDENTITY" \
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM="$CS_TEAM" \
-            ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
+            ARCHS="${{ matrix.archs }}" ONLY_ACTIVE_ARCH=NO \
             build
 
       # The product path is not always deterministic (may land in
@@ -95,6 +106,36 @@ jobs:
           fi
           echo "APP_PATH=$APP" >> "$GITHUB_ENV"
 
+      # 交叉编译最容易静默出错的地方：在 arm64 runner 上编 x86_64 时，
+      # 只要 ARCHS 没覆盖到，就可能悄悄产出 universal（甚至本机架构）的二进制，
+      # 包名对、内容不对。逐个 Mach-O 核对架构集合。
+      - name: Verify binary architecture
+        run: |
+          set -euo pipefail
+          EXPECTED="${{ matrix.archs }}"
+          normalize() { echo "$1" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ' | sed 's/ *$//'; }
+          EXPECTED_N="$(normalize "$EXPECTED")"
+
+          check() {
+            bin="$1"
+            if [ ! -f "$bin" ]; then
+              echo "::error::缺少可执行文件: $bin"
+              exit 1
+            fi
+            actual="$(lipo -archs "$bin")"
+            echo "$bin: $actual"
+            if [ "$(normalize "$actual")" != "$EXPECTED_N" ]; then
+              echo "::error::$bin 架构不符：期望 '$EXPECTED_N'，实际 '$actual'"
+              exit 1
+            fi
+          }
+
+          check "$APP_PATH/Contents/MacOS/Zeroflow"
+          shopt -s nullglob
+          for appex in "$APP_PATH"/Contents/PlugIns/*.appex; do
+            check "$appex/Contents/MacOS/$(basename "$appex" .appex)"
+          done
+
       - name: Verify code signature
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         run: |
@@ -110,14 +151,14 @@ jobs:
 
       - name: Package app zip
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        run: ditto -c -k --keepParent --sequesterRsrc "$APP_PATH" Zeroflow-macos.zip
+        run: ditto -c -k --keepParent --sequesterRsrc "$APP_PATH" "Zeroflow-macos-${{ matrix.arch }}.zip"
 
       - name: Upload app artifact
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v5
         with:
-          name: Zeroflow-macos
-          path: Zeroflow-macos.zip
+          name: Zeroflow-macos-${{ matrix.arch }}
+          path: Zeroflow-macos-${{ matrix.arch }}.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -134,21 +175,21 @@ jobs:
           mkdir -p "$STAGING"
           ditto "$APP_PATH" "$STAGING/Zeroflow.app"
           create-dmg \
-            --volname "Zeroflow $VERSION" \
+            --volname "Zeroflow $VERSION (${{ matrix.arch }})" \
             --background dmg_bg.png \
             --window-size 660 400 \
             --icon-size 128 \
             --icon "Zeroflow.app" 160 146 \
             --app-drop-link 500 146 \
             --hide-extension "Zeroflow.app" \
-            "Zeroflow-$VERSION.dmg" \
+            "Zeroflow-$VERSION-${{ matrix.arch }}.dmg" \
             "$STAGING"
 
       - name: Upload DMG artifact
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v5
         with:
-          name: Zeroflow-dmg
+          name: Zeroflow-dmg-${{ matrix.arch }}
           path: Zeroflow-*.dmg
           if-no-files-found: error
           retention-days: 7
@@ -176,11 +217,14 @@ jobs:
           name: Zeroflow ${{ github.ref_name }}
           generate_release_notes: true
           body: |
-            ## 安装
+            ## Install
 
-            1. Download the `Zeroflow-*.dmg`,double-click to open, then drag Zeroflow into the Applications folder.
-            2. The app is not signed or notarized by an Apple Developer. 
-               If you see a warning such as `App is damaged and can’t be opened` or `Apple cannot verify the developer` when launching it for the first time, use either of the following methods:
+            1. Pick the package for your Mac, double-click the DMG, then drag Zeroflow into the Applications folder.
+               - **Apple Silicon (M1/M2/M3/M4)** → `Zeroflow-*-arm64.dmg`
+               - **Intel Mac** → `Zeroflow-*-x86_64.dmg`
+               - **Not sure** → `Zeroflow-*-universal.dmg` (works on both, larger download)
+            2. The app is not signed or notarized by an Apple Developer.
+               If you see a warning such as `App is damaged and can't be opened` or `Apple cannot verify the developer` when launching it for the first time, use either of the following methods:
               - Go to **System Settings → Privacy & Security** and click **Open Anyway**.
               - Or run the following command in Terminal, then try opening the app again:
                 `xattr -cr /Applications/Zeroflow.app`

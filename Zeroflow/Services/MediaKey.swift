@@ -8,8 +8,9 @@ import ApplicationServices
 /// 但系统媒体键走 MediaRemote 的 command 分发，能到达**当前的 now playing owner**。
 ///
 /// 关键前提：目标 app 必须就是 owner。owner 被别的 app 占着时（实测 Chrome 空闲后
-/// 仍挂着会话），媒体键会被那个 app 吃掉，目标 app 完全收不到。调用方必须先确认
-/// `NowPlayingMonitor.nowPlayingOwnerBundleID()` 与目标一致，否则会误控别的 app。
+/// 仍挂着会话），媒体键会被那个 app 吃掉，目标 app 完全收不到。所以
+/// `NowPlayingMonitor` 的展示对象**就是 owner**（DEV-090），`send()` 发送前还会用子进程
+/// 再核一次 owner，不一致就不发——否则会误控别的 app。
 enum MediaKey {
     static let playPause: Int32 = 16   // NX_KEYTYPE_PLAY
     static let next: Int32 = 17        // NX_KEYTYPE_NEXT

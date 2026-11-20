@@ -528,7 +528,7 @@
 - **Pitfall:** 两个声源同时在放(A 早开、B 后开,卡片显示 B)。点暂停把 B 停掉后,卡片切到还在响的 A;再点暂停,本该停掉 A,实际却是 **B 被重新拉起来**,两个声源一起在播。
 - **Cause:** ① B 暂停后离开 CoreAudio 出声列表,`trackOperations` 里 `operatedAt = operatedAt.filter { live.contains($0.key) }` 把 B 的「刚被操作」记录删掉,`pickActive` 于是退到还在响的 A;② 但媒体键(`NX_KEYTYPE_PLAY`)由 MediaRemote 分发给**最后开播的那个 app**,也就是 B,无法定向(DEV-081)。于是「卡片上是 A、按下去动的是 B」;③ B 被媒体键拉起后重新进出声列表,`operatedAt[B] = now`,卡片又跳回 B——三步串成「两个都在播」。
 - **Prevention:** 把「展示对象」从「出声列表里 operatedAt 最大的那个」改成**粘性状态** `current`(`updateCurrent`):只有「某个 app 的 operatedAt 比 `current.at` 更晚」或「它退出了」才换人,暂停、离开出声列表一律不换。卡片停在暂停态的那个 app 上,按钮点的就是它,系统路由的也是它。`pickActive`/`idleInfo`/`lastAudioApp` 因此整体删除——`audioOnlyInfo` 直接按 `current` 出卡,app 重启(pid 变了)时按 bundleID 重新认 pid。面板关着时不轮询,`operatedAt` 收不到信号——重开时靠 `previousActives` 仍是旧集合这一点认出「关着期间有人开播」(信号 1),**不要**在重开时按「谁在响」重挑(那会让「暂停当前播放器、切个窗口」直接跳卡,见 DEV-087)。
-- **代价:** 当前播放器暂停、别的 app 还在响时,卡片显示的是「已暂停」而不是那个在响的 app(用户要的就是这个:状态只存最新那个播放器)。想暂停另一个 app 只能去它自己的界面。
+- **代价:** 当前播放器暂停、别的 app 还在响时,卡片显示的是「已暂停」而不是那个在响的 app(用户要的就是这个:状态只存最新那个播放器)。想暂停另一个 app 只能去它自己的界面。**这条代价在 DEV-089 被收窄**:现在「它确认静了、而别人确认在响」会让位,其余情况(单纯暂停、没人替代)仍然粘住。
 - **验证:** 两个可控假播放器:`play a` → `play b` → 点卡片暂停 → 卡片仍显示 B(已暂停)、A 继续响 → 再点播放 → 只把 B 拉起来,不会出现「两个都在播」。日志里 `NowPlaying: current=...` 只在「新开播」时变。
 
 ## DEV-085: 播放/暂停图标要「点击即翻 + 律动验证」,不能只信 playbackRate
@@ -546,7 +546,7 @@
 - **Prevention:**
   ① 新增 `AppAudioProbe`:用 `SCContentFilter(display:including:[app], exceptingWindows:[])` + `capturesAudio` 给**当前播放器**单独开一条捕获流(16×16@1fps、只算峰值不跑 FFT),按「有没有能量」判它在不在出声,0.3s 保持。复用截图已有的屏幕录制权限,不额外弹授权。
   ② **没收到过音频 buffer 之前绝不说「静音」**:分不清「它本来就静着」和「按 app 捕获对它不生效」,说错会把正在播的卡片判成暂停。只有先听见它出声,之后的静音才可信;否则 `isSounding = nil`,调用方退回旧规则。
-  ③ 探针只在面板可见时对当前播放器生效(切人时先停旧流再建新流,`generation` 丢弃过期启动结果),收起面板即 `setTarget(nil)`,不留空转捕获流。
+  ③ 探针只在面板可见时生效,收起面板即停掉所有捕获流,不留空转流。~~只给当前播放器建一条~~ —— **已由 DEV-089 改成给所有候选各建一条**,`generation` 仍用来丢弃过期启动结果。
   ④ 探针拿不到电平时用**锁存**(`audioOnlyLatch`)兜底:只认正向证据(离开出声列表=停、重新进入=播、混音由静变响且单一候选=播、点击意图),不再用「混音有声 + 在列表里」每次重推——那条正是「点了暂停又自己变回在播」的来源。待确认窗口内与意图相反的证据先不覆盖图标,窗口结束才认。
   ⑤ 上报型 app(`.mediaRemote`)直接信 `playbackRate`,不再被「在不在出声列表里」盖掉。
 - **代价:** 多一条捕获流(≈ 一个 16×16@1fps 音频会话);按 app 捕获对个别 app 可能不生效(靠 `nil` 退回锁存);系统音量 0 时探针听不到声音,卡片会显示暂停(与律动一致,取舍见 DEV-085)。
@@ -567,3 +567,29 @@
 - **Prevention:** ① TTL 10s → 60s(切换器要的是「一眼认出是哪个窗口」,几十秒内容陈旧比每次重抓伤得轻);② costLimit 8MB → 32MB(≈110 张)、countLimit 40 → 80,内存代价有界;③ `presentSession` 先用 `cachedThumbnail` 预填 tiles,`allSatisfy(有图)` 时**零等待上屏**,后台抓取只做替换;④ `dismissSession` 对仍缺图的瓦片延迟 1.5s 调 `prewarm` 补抓(绕过抓取节流)。
 - **代价:** 缓存里的图可能陈旧最多 60s;因此缓存条目必须记 `bounds`,宽高比变化超 8% 视为过期(否则 resize/全屏后旧图被拉伸,TTL 越长越明显)。定时轮询预热不做——空闲抓图是无谓开销,TTL 内缓存本身就是热的。
 - **验证:** `ZEROFLOW_SWITCHER_DEBUG=1` 启动,连按两次 ⌘⇥,`/tmp/zeroflow.log` 里第二次应出现 `SWITCHER present windows=N cachedPrefill=N`(N 相等 = 全命中),面板当帧就有缩略图。
+
+## DEV-089: 只探「当前播放器」一个 app 时,多音源下卡片会永久粘在暂停的那个上
+
+- **Pitfall:** 两个音源同时存在(比如 Chrome 在放视频、QQ音乐也放过),把 QQ音乐暂停后,卡片停在「QQ音乐 · 已暂停」上再也不动——哪怕 Chrome 一直在响、甚至换了新视频。用户看到的就是「卡片停在错的 app 上」,而且没有任何操作能把它挪回来(除非重启 app 或退出 QQ音乐)。
+- **Cause:** 三条串起来,没有任何出路:① `updateCurrent` 的换人条件只有「`operatedAt` 比 `current.at` 晚」和「它退出了」——暂停不算,`current` 永久粘住(DEV-084 的设计);② 顶掉它需要的 `operatedAt` 更新只发生在「新进出声列表 / `playbackRate` 停转播 / 混音静→响且**只有一个**候选 / 会话曲名变化」四个信号上,而多音源下第 3 条刻意不猜、Chrome 一直在播也不会重新进列表,于是 Chrome 永远拿不到新时间戳;③ `read()` 里 `audioOnlyInfo(current)` 只要 app 还活着就非 nil,所以「current 暂停 + Chrome 在响」时连 `media` 分支都轮不到,Chrome 根本没机会出卡。根子是**探针只给 current 一个 app 建流**,系统里没有任何接口能回答「另一个 app 现在是不是在响」——`audible` 是所有 app 的叠加(DEV-079),`IsRunningOutput` 暂停后不归零(DEV-075)。
+- **Prevention:**
+  ① `AppAudioProbe` 从单目标改成**多目标**:`setTargets([Target])` 给白名单内每个「在出声列表里的 app」各建一条 16×16@1fps 纯音频流(白名单最多 3 个),每条流独立的 `Probe`(自己的 stream/generation/lastSoundAt) + 独立 `Sink` 回调代理,10Hz 汇总成 `levels: [String: Bool]` 发布;`sounding(for:)` 走 `NSLock` 保护的快照,轮询队列和主线程都能读。
+  ② `updateCurrent` 加第三条换人路径 `handoverCandidate`:**current 确认静了 + 某个候选确认在响** → 让位(新 `at` 用 now)。current 静了的判定分两路:有探针值就只信探针;没探针值(它暂停后离开出声列表,我们不给不在输出的 app 建流)就看「离开列表多久了 > 1s」——`IsRunningOutput` 只有假阳性,不在列表里就是真的没在输出。1s 防抖是为了躲「app 刚恢复播放、进程注册晚一拍」的瞬时缺失;面板重开时也把计时器重置,免得一打开就按「谁在响」重挑(DEV-087)。
+  ③ `applyLevels` 发现卡片上的 app 刚静、而别的候选在响时立刻 `tick()` 催一次,否则换人要等最多 2s 才发生。
+  ④ `audioOnlyLatch` 增加「离开出声列表 = 停」这一条并放到「混音静没静」之前——多音源时混音永远是响的,原来那条判据等于失效。
+  ⑤ 诊断日志 `logCurrent` 每个候选后面带上探针结论(`bid=2.3s/响`),排查「为什么显示的是它」一眼可见。
+- **代价:** 最多 3 条捕获流(每条约一个 16×16@1fps 音频会话),面板打开且有多个音源时多占一点内存和 CPU;按 app 捕获对个别 app 不生效时该候选永远是 `nil`,换人退回保守策略(不动)。**媒体键仍无法定向**(DEV-081),所以换到「非 owner 的 app」上时按钮还是可能控到 owner——这一点没变,但显示至少跟上了实际在响的那个。
+- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`,两个音源同时存在时:日志应出现多条 `AppAudio: 探测 pid=... bundle=...`(每个候选一条);暂停 current 后 1~2s 内出现 `current <A> → <B>(旧的静了、它在响)`,卡片切到在响的那个;`current=... [com.google.Chrome=3.2s/响 com.tencent.QQMusicMac=1.0s/静]` 这行能直接看出谁在响。
+
+## DEV-090: 卡片显示的对象必须就是媒体命令的路由目标,「粘性 current」是错的
+
+- **Pitfall:** 灵动岛音乐卡片的切换逻辑长期不对:卡片显示 A、按播放/暂停动的却是 B;A 关掉后卡片还挂着它;新开一个音源,卡片不跟过去。用户提了四条硬规则:① 卡片内容和实际能控的 app 必须一致;② 点播放/暂停一定控卡片上那个 app 的音源;③ 音源关闭时卡片若显示它就必须清掉,有第二音源就显示第二个,没有就不显示;④ 新音源开播时尽量显示最新的(前提是 1、2 成立)。
+- **Cause:** 展示对象(`current`,粘性)和控制目标(now playing owner)是两套独立状态。`MRMediaRemoteSendCommand` 和系统媒体键**只会路由给 owner**,无法定向(DEV-081),所以卡片一旦显示 owner 之外的 app,按下去必然控错——DEV-084 用「粘住暂停的那个 app」来缓解,DEV-089 又加 `handoverCandidate` 让它在「旧的静了、别人在响」时让位,但让位后显示的正是**非 owner**,照样控错。根子是把「显示」当成独立问题在解,而它和控制共用同一个不可定向的通道。
+- **Prevention:** **把展示对象直接定义成 owner**,别再维护第二套状态:
+  ① 子进程读取(`readViaSubprocess`)输出**两段**:`owner`(playerPath.client 的 bundleID)+ 条目(曲名/歌手/进度)。QQ音乐这类 app 只注册媒体键路由、不发元数据——item 是 nil 但 owner 有值,旧脚本在 `NOITEM` 处直接返回把 owner 丢了,正是粘性猜测的来源;
+  ② `read()` 只按 owner 出卡:owner 上报了元数据 → 会话卡(控制 `.mediaRemote`);没上报 → AX/窗口标题兜底卡(控制 `.mediaKey`);owner 不在白名单/已退出 → **不出卡**(显示了也控不到);
+  ③ 删掉 `current`/`CurrentPlayer`/`operatedAt`/`trackOperations`/`updateCurrent`/`handoverCandidate`/`curSeenAt`/`lastMediaPlaying`/`lastMediaIdentity`/`sawSilence` 一整套,切换变成 owner 换人 = 卡片换人,规则 3/4 自动成立;
+  ④ `publish()` 发现卡片上那个 app 已经不在运行 → 立刻清卡,不吃 `staleLimit` 防抖(规则 3);其余读空仍防抖,免得子进程抖动把卡片闪空;
+  ⑤ `send()` 发送前用子进程再核一次 owner(异步 ~80ms,按钮不卡),不一致就**不发**、改 `tick()` 刷新卡片——这是「点谁控谁」的最后一道闸,把「这一两秒内 owner 换人」的窗口也堵掉。
+- **代价:** owner 被别的 app 占着时(Chrome 挂着暂停会话),正在响的 QQ音乐控不到,卡片会显示 owner(Chrome 暂停态)而不是在响的那个——这是 macOS 路由的现实,不是能靠显示逻辑绕过的;反过来「显示在响的、按钮控 owner」才是用户明确否掉的错。Chrome 重新注册会话(切窗口)时卡片可能跟着换人,与系统 Now Playing 的行为一致(其他 mac 灵动岛同款)。
+- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`,日志里 `idle owner=...` / `media app=...（owner）` / `audio-only app=...` 三者只会出现 owner;两个音源交替播放时,卡片跟着 owner 走;`send` 行不再出现「⚠️不一致」,只可能出现「放弃 ...（路由目标已换人）」;关掉卡片上那个 app,卡片当帧清空或换成另一个音源。

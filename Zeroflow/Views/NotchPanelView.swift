@@ -292,7 +292,7 @@ struct NotchContentView: View {
     /// nil = 无过渡（present / 日程加载 refit）
     var slide: CardSlide? = nil
     /// 滑动进度驱动器：面板弹簧逐帧写 progress，两个卡片包装视图只观察它做位移。
-    /// 这里用普通属性（默认实例）而不是 @ObservedObject，避免整个内容视图按 120Hz 重算
+    /// 这里用普通属性（默认实例）而不是 @ObservedObject，避免整个内容视图按帧率重算
     var slideDriver = CardSlideDriver()
     /// 「一键清理缓存」按钮的状态（idle / running / finished），资源卡底部按钮据此换文案
     @ObservedObject private var cacheCleaner = CacheCleaner.shared
@@ -1829,7 +1829,7 @@ final class NotchPanel: NSPanel {
         applyLayoutFrame(layout, screen: screen)
         invalidateShadow()
         guard currentSlide != nil else { return }
-        // 与面板形状弹簧同一个 120Hz 时钟：临界阻尼、零过冲
+        // 与面板形状弹簧同一个时钟：临界阻尼、零过冲
         springAnimator.animateSlide(from: 0, to: 1) { [weak self] in
             self?.finishSlide()
         }
@@ -2079,6 +2079,17 @@ private final class NotchShapeContainerView: NSView {
     private let backdrop: NSView?
     /// 当前形状外包络宽（插件每帧经 applyProfile 更新；nil = 退化为整宽刘海形）
     private var profile: (top: CGFloat, neck: CGFloat, bottom: CGFloat)?
+    /// 上一次真正建过路径的输入。弹簧每帧 `applyProfile` 与 `layout()` 各叫一次
+    /// `updateMask`，输入没变就跳过——20 段贝塞尔的 CGPath 一帧只建一次
+    private struct MaskInputs: Equatable {
+        var size: CGSize
+        var top: CGFloat
+        var neck: CGFloat
+        var bottom: CGFloat
+    }
+    private var builtMask: MaskInputs?
+    /// 累计建过多少次 CGPath（`ZEROFLOW_NOTCH_TRACE=1` 时打进 trace：核对每帧只建一次）
+    static var pathBuilds = 0
 
     deinit { MemoryProbe.noteDeinit("NotchShapeContainerView") }
 
@@ -2091,7 +2102,7 @@ private final class NotchShapeContainerView: NSView {
         self.glassBackground = glassBackground
         self.backdrop = glassBackground ? PanelGlassBackground.make(cornerRadius: 0) : nil
         self.maskLayer = CAShapeLayer()
-        // 弹簧 120Hz 改 path/frame 时禁用隐式动画，避免遮罩滞后于窗口几何
+        // 弹簧每帧改 path/frame 时禁用隐式动画，避免遮罩滞后于窗口几何
         maskLayer.actions = ["path": NSNull(), "bounds": NSNull(), "position": NSNull()]
         super.init(frame: NSRect(origin: .zero, size: initialSize))
         wantsLayer = true
@@ -2122,7 +2133,9 @@ private final class NotchShapeContainerView: NSView {
         updateMask()
     }
 
-    /// 更新形状外包络宽（弹簧每帧调用；高度始终取当前 bounds，跟随窗口 frame）
+    /// 更新形状外包络宽（弹簧每帧调用；高度始终取当前 bounds，跟随窗口 frame）。
+    /// 这里直接重建，同帧内 `setFrame` 触发的 `layout()` 再来一次时由
+    /// `updateMask` 的输入缓存挡掉——每帧只建一次 CGPath，且不依赖 layout 的时序
     func applyProfile(topWidth: CGFloat, neckWidth: CGFloat, bottomWidth: CGFloat) {
         profile = (topWidth, neckWidth, bottomWidth)
         updateMask()
@@ -2144,12 +2157,19 @@ private final class NotchShapeContainerView: NSView {
     }
 
     private func updateMask() {
+        let inputs = MaskInputs(size: bounds.size,
+                                top: profile?.top ?? bounds.width,
+                                neck: profile?.neck ?? bounds.width,
+                                bottom: profile?.bottom ?? bounds.width)
+        // 弹簧每帧两条路径进这里（applyProfile 一次、layout 一次），输入相同就只留一次
+        guard builtMask != inputs else { return }
+        builtMask = inputs
+        Self.pathBuilds += 1
         maskLayer.frame = bounds
-        maskLayer.path = Self.notchShapePath(size: bounds.size, barHeight: barHeight,
-                                             topWidth: profile?.top ?? bounds.width,
-                                             neckWidth: profile?.neck ?? bounds.width,
-                                             bottomWidth: profile?.bottom ?? bounds.width,
-                                             referenceWidth: referenceWidth)
+        maskLayer.path = Self.notchShapePath(size: inputs.size, barHeight: barHeight,
+                                            topWidth: inputs.top, neckWidth: inputs.neck,
+                                            bottomWidth: inputs.bottom,
+                                            referenceWidth: referenceWidth)
     }
 
     /// 刘海形路径（层坐标 y 向上，形状在窗口内水平居中）：
@@ -2361,12 +2381,16 @@ private final class NotchSpringAnimator {
     /// 分量顺序：centerX, topY, topWidth, neckWidth, bottomWidth, height（位置 = 锚点，origin 每帧反推）
     private var springs: [Spring]?
     private var completion: (() -> Void)?
-    /// 卡片滑动进度弹簧（与形状共用同一个 120Hz 时钟：response 0.32 / ζ1.0，临界阻尼零过冲）
+    /// 卡片滑动进度弹簧（与形状共用同一个时钟：response 0.32 / ζ1.0，临界阻尼零过冲）
     private var slideSpring: Spring?
     private var slideCompletion: (() -> Void)?
     /// 卡片滑动是否在途（连点保护用）
     var isSliding: Bool { slideSpring != nil }
     private var timer: Timer?
+    /// 本段动画的帧间隔：按面板所在屏幕的刷新率定（60Hz 屏不该跑 120Hz）
+    private var stepInterval: TimeInterval = 1.0 / 120.0
+    /// 上一帧时间戳，用来算真实 dt；0 = 尚未起步
+    private var lastStepTime: CFTimeInterval = 0
     private weak var panel: NotchPanel?
 
     /// 后续待播的段
@@ -2474,8 +2498,12 @@ private final class NotchSpringAnimator {
 
     private func startTimerIfNeeded() {
         guard timer == nil else { return }
+        // 帧率跟屏幕走：ProMotion 120Hz 才有必要跑 120，60Hz 屏一半的 tick 是白算
+        let hz = panel?.screen?.maximumFramesPerSecond ?? 60
+        stepInterval = 1.0 / TimeInterval(max(30, min(120, hz)))
+        lastStepTime = 0
         var t: Timer?
-        t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+        t = Timer(timeInterval: stepInterval, repeats: true) { [weak self] _ in
             guard let self else { t?.invalidate(); return }
             self.tick()
         }
@@ -2489,7 +2517,12 @@ private final class NotchSpringAnimator {
             stopTimer()
             return
         }
-        let dt: CGFloat = 1 / 120
+        // 真实帧间隔：主线程卡顿时按实际耗时积分，动画总时长不膨胀（固定 dt 会整体走慢）；
+        // 上限 1/30 兜住切后台回来的大跳——半隐式欧拉在 dt < 2/ω（≈0.1s）内才稳定
+        let now = CACurrentMediaTime()
+        let elapsed = lastStepTime == 0 ? stepInterval : now - lastStepTime
+        lastStepTime = now
+        let dt = CGFloat(min(max(elapsed, 0), 1.0 / 30.0))
         var allSettled = true
 
         if var springs {
@@ -2556,6 +2589,7 @@ private final class NotchSpringAnimator {
     private func stopTimer() {
         timer?.invalidate()
         timer = nil
+        lastStepTime = 0
         springs = nil
         slideSpring = nil
         slideCompletion = nil
@@ -2578,8 +2612,8 @@ private final class NotchSpringAnimator {
         let ms = (now - traceStart) * 1000
         let dt = (now - traceLast) * 1000
         traceLast = now
-        ZSLog(String(format: "notch trace f=%d t=%.0fms dt=%.1f topW=%.1f h=%.1f a=%.2f",
+        ZSLog(String(format: "notch trace f=%d t=%.0fms dt=%.1f topW=%.1f h=%.1f a=%.2f b=%d",
                      traceFrames, ms, dt, springs[2].value, springs[5].value,
-                     panel?.contentAlpha ?? -1))
+                     panel?.contentAlpha ?? -1, NotchShapeContainerView.pathBuilds))
     }
 }

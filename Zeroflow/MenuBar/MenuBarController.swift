@@ -229,12 +229,6 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSWindowDelegate
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        if SettingsStore.shared.lastSavedPath != nil {
-            let recentItem = NSMenuItem(title: L10n.tr("打开最近截图"), action: #selector(openRecent), keyEquivalent: "")
-            recentItem.target = self
-            menu.addItem(recentItem)
-        }
-
         menu.addItem(.separator())
 
         let updateItem = NSMenuItem(title: "", action: #selector(checkForUpdates), keyEquivalent: "")
@@ -281,11 +275,6 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     @objc private func languageDidChange() {
         rebuildMenu()
-    }
-
-    @objc private func openRecent() {
-        guard let path = SettingsStore.shared.lastSavedPath else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 
     // MARK: - 更新

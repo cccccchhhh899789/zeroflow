@@ -77,6 +77,20 @@ jobs:
           echo "CS_IDENTITY=Apple Development" >> "$GITHUB_ENV"
           echo "CS_TEAM=8NHN73Q43T" >> "$GITHUB_ENV"
 
+      # 应用内更新检测拿 CFBundleShortVersionString 与 GitHub tag 比大小，
+      # 必须让构建产物的版本号跟 tag 对齐：tag 构建注入 vX.Y.Z 去掉 v，
+      # 非 tag 构建注入 0.0.0-dev（低于任何正式版本，不会误判成最新）。
+      - name: Resolve marketing version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            MV="${GITHUB_REF_NAME#v}"
+          else
+            MV="0.0.0-dev"
+          fi
+          echo "MV=$MV" >> "$GITHUB_ENV"
+          echo "MARKETING_VERSION=$MV"
+
       - name: Build
         run: |
           set -euo pipefail
@@ -88,6 +102,7 @@ jobs:
             CODE_SIGN_IDENTITY="$CS_IDENTITY" \
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM="$CS_TEAM" \
+            MARKETING_VERSION="$MV" \
             ARCHS="${{ matrix.archs }}" ONLY_ACTIVE_ARCH=NO \
             build
 

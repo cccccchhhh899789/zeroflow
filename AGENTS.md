@@ -57,6 +57,9 @@ xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow -configuration Release -
 | `ZEROFLOW_MEM_DEBUG=1` | 每 30s 打印一次 `phys_footprint/resident/compressed/malloc`(对象 deinit 计数也需此开关或 `ZEROFLOW_MEM_CYCLE`) |
 | `ZEROFLOW_MEM_CYCLE=<feature>:<count>[:openMs[:closeMs]]` | 自动开关某功能 N 次并逐轮打 footprint:`notch`(需配 `ZEROFLOW_NOTCH_FAKE=1`)/ `clipboard` / `switcher` / `editor`;`ZEROFLOW_MEM_CYCLE_EXIT=1` 跑完退出 |
 | `ZEROFLOW_CLEAN_ON_LAUNCH=<秒>` | 启动 N 秒后自动执行一次「一键清理」(会真删缓存/日志),配合 `ZEROFLOW_MEM_DEBUG=1` 可看清理前后的 `clean-before/after/settled` footprint |
+| `ZEROFLOW_FAKE_VERSION=<ver>` | 覆盖本机版本号,验证更新检测三态(`1.5.11` 有新版 / `1.5.12` 已最新 / `9.9.9` 高于远端) |
+| `ZEROFLOW_UPDATE_AUTOCHECK=1` | Debug 构建强制开启「启动后异步检查一次更新」;默认 Debug 跳过,因为本地构建版本号恒为 pbxproj 的 1.0,启动检查必然误报 |
+| `ZEROFLOW_UPDATE_WINDOW=1` | 启动 1.5s 后用假数据(40 条超长说明)打开更新详情窗口,并把 contentView 离屏抓成 `/tmp/zf-update-window.png`,核对排版/滚动/菜单项图标;不依赖屏幕录制权限 |
 
 ## 项目架构
 

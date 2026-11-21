@@ -38,6 +38,36 @@ final class AppIconCache {
         cache.removeAllObjects()
     }
 
+    /// 当前 app 自己的图标：按 pointSize 画成单表示位图（2x），
+    /// 供菜单项/更新窗口使用，避免把整套多表示大图挂到这些控件上。
+    static func ownIcon(pointSize: CGFloat) -> NSImage? {
+        guard let source = NSApp.applicationIconImage else { return nil }
+        let side = max(1, Int((pointSize * 2).rounded()))
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: side,
+                                         pixelsHigh: side,
+                                         bitsPerSample: 8,
+                                         samplesPerPixel: 4,
+                                         hasAlpha: true,
+                                         isPlanar: false,
+                                         colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0,
+                                         bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep) else {
+            return nil
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.imageInterpolation = .high
+        source.draw(in: NSRect(x: 0, y: 0, width: side, height: side),
+                    from: .zero, operation: .sourceOver, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+
+        let image = NSImage(size: NSSize(width: pointSize, height: pointSize))
+        image.addRepresentation(rep)
+        return image
+    }
+
     /// 画成固定边长单表示位图（约 64KB）；绘制完原图即释放
     private static func downsample(_ icon: NSImage) -> NSImage? {
         let side = pixelSide

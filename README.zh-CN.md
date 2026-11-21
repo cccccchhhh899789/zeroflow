@@ -42,8 +42,10 @@ macOS 原生的轻量效率工具集：截图标注、窗口切换、Dock 增强
 前置：macOS 14.0+、Xcode 16+。
 
 ```bash
-xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow \
-  -configuration Release -derivedDataPath build -allowProvisioningUpdates build
+xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow -configuration Release \
+  -derivedDataPath build \
+  CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+  clean build
 open build/Build/Products/Debug/Zeroflow.app
 ```
 

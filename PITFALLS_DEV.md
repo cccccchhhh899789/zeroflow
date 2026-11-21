@@ -623,3 +623,13 @@ pluginkit -m -i com.zeroflow.app.finderSync   # 期望 "+    com.zeroflow.app.fi
 ```
 
 - **菜单不出现时的排查顺序:** `pluginkit -m -i` 是 `+` → 系统设置「登录项与扩展」里把扩展关开一次 → `killall Finder` → 上面的配方。
+
+## DEV-094: 更新检测依赖 CFBundleShortVersionString,而它和 GitHub tag 长期脱节
+- **Pitfall:** pbxproj 里 `MARKETING_VERSION` 恒为 `1.0`,发布 tag 已经是 `v1.5.12`;直接拿 bundle 版本跟 `releases/latest` 比,任何正式版用户都会被判「有新版本」,更新提示永远消不掉。
+- **Cause:** 版本号从未随 tag 注入,`create_release_tag.sh` 只打 tag 不改工程。
+- **Prevention:** CI 在 tag 构建时显式传 `MARKETING_VERSION="${GITHUB_REF_NAME#v}"`,非 tag 构建传 `0.0.0-dev`(低于任何正式版)。已装的老版本无法追溯,只能手动升一次到带正确版本号的包后自愈。本地调试用 `ZEROFLOW_FAKE_VERSION` 覆盖,别指望 pbxproj 的值。
+
+## DEV-095: 换签名方式做增量构建,ValidateEmbeddedBinary 报「not signed with the same certificate」
+- **Pitfall:** 同一份 DerivedData 先跑过 Team 签名的构建,再跑 `CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=` 的 Release,构建在 `ValidateEmbeddedBinary ... FinderSyncExtension.appex` 挂掉:`error: Embedded binary is not signed with the same certificate as the parent app`。用 `codesign -dv` 对比能看到主 app 是 `Signature=adhoc / TeamIdentifier=not set`,appex 还留着 `Apple Development / 8NHN73Q43T`。
+- **Cause:** appex 的输入没变,增量构建跳过了它的重签步骤;只有主 app 被命令行签名设置重签成 adhoc,两边证书对不上。
+- **Prevention:** 切换签名方式(Team ↔ ad-hoc)前先 clean:`xcodebuild ... clean build`。清理后两端都会重签成 adhoc,校验通过。本地出包请用 Team 签名(`-allowProvisioningUpdates`),ad-hoc 只做 CI 编译检查(见 DEV-018:ad-hoc 包的扩展无 App Group 写权限,「打开终端」会静默失败)。

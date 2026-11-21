@@ -42,11 +42,14 @@ macOS 原生的轻量效率工具集：截图标注、窗口切换、Dock 增强
 前置：macOS 14.0+、Xcode 16+。
 
 ```bash
+
 rm -rf build
 xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow -configuration Release \
   -derivedDataPath build -allowProvisioningUpdates \
   MARKETING_VERSION=9.9.99 \
   build
+
+rm -rf /Applications/Zeroflow.app
 cp -r build/Build/Products/Release/Zeroflow.app /Applications/Zeroflow.app
 
 

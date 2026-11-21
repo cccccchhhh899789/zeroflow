@@ -33,7 +33,7 @@ APP_NAME="Zeroflow"
 OUT_DIR="dist"
 BUILD_ROOT="build-release"
 RELEASE_REPO="hellolio/zeroflow"
-APP_SUBDIR="Zeroflow/dist"
+APP_SUBDIR="dist"
 
 ARCHS="arm64 x86_64"
 VERSION=""

@@ -10,7 +10,7 @@ macOS 原生的轻量效率工具集：截图标注、窗口切换、Dock 增强
 
 [![Sponsor][SponsorBadge]][SponsorUrl]
 [![Latest release](https://img.shields.io/github/v/release/hellolio/zeroflow)](https://github.com/hellolio/zeroflow/releases/latest)
-[![License: MIT](https://img.shields.io/github/license/hellolio/zeroflow)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/github/license/hellolio/zeroflow)](LICENSE)
 [![macOS: 14.0+](https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple&logoColor=white)](https://github.com/hellolio/zeroflow)
 
 [SponsorUrl]: https://github.com/sponsors/hellolio
@@ -98,4 +98,6 @@ zeroflow/
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0-only](LICENSE)
+
+版权人保留以其他条款（含商业许可）分发本软件的权利。

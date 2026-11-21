@@ -2,50 +2,20 @@
 
 开发踩坑记录(dev-test skill 维护,新增条目按 `DEV-XXX` 递增编号,勿改已有编号)。
 
-## DEV-001: 本地 xcodebuild 不带 `-allowProvisioningUpdates` 直接 BUILD FAILED
-- **Pitfall:** 构建时报 `No profiles ... were found`,BUILD FAILED。
-- **Cause:** FinderSync 扩展 target 带 App Group(`8NHN73Q43T.com.zeroflow.app`)与沙盒授权,需要 Xcode 自动生成/更新含该 App Group 的 provisioning profile。
-- **Prevention:** 本地构建一律带 `-allowProvisioningUpdates`;无团队证书的环境用 CI 等价命令(`CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=`)。
-
-## DEV-002: `-derivedDataPath` 指向无写权限目录直接 BUILD FAILED
-- **Pitfall:** 给 `-derivedDataPath` 的目录为只读(如 0644)时,构建直接失败。
-- **Cause:** xcodebuild 需要在 derived data 目录写中间产物,无写权限即失败。
-- **Prevention:** 换一个可写路径。
-
 ## DEV-003: xcodebuild 产物路径不可靠,直接 `cp -R` 得到坏符号链接
 - **Pitfall:** Debug 产物可能落在 `build/Build/Intermediates.noindex/ArchiveIntermediates/.../Applications/Zeroflow.app`,用 `cp -R` 复制它得到的是坏符号链接。
 - **Cause:** 产物落点不总是确定的。
 - **Prevention:** 用 `find <derived>/Build -name "Zeroflow.app"` 定位;复制用 `cp -R -L` 解引用;复制前先 `rm -rf` 目标。
-
-## DEV-004: 新增 target 需手改 pbxproj,改错直接 BUILD FAILED
-- **Pitfall:** 以为 `.swift` 文件和 target 一样自动纳入工程,新增 target 时漏配;或手改 pbxproj 出错后构建失败。
-- **Cause:** 源文件走 `PBXFileSystemSynchronizedRootGroup` 自动纳入(不要手改 pbxproj 加文件),但 target 本身、Embed App Extensions 阶段、target dependency 都是手工维护的(主 app 已不再链接 `FinderSync.framework`,见 DEV-091)。
-- **Prevention:** 新增 `.swift` 文件放对应目录即可;新增/调整 target 才动 pbxproj,改完立即构建验证。当前仅 `FinderSyncExtension/` 一个扩展 target,已配好。
 
 ## DEV-005: FinderSync 扩展未沙盒化会被 pkd 静默拒绝
 - **Pitfall:** `pluginkit -m` 永远不出现该扩展,`pluginkit -a` 返回 0 却无任何日志,右键菜单不出现。
 - **Cause:** pkd(pluginkit)静默拒绝非沙盒的 FinderSync 扩展(`com.apple.security.app-sandbox` 缺失)。
 - **Prevention:** 扩展 target 必须保持沙盒授权;排查扩展不可见时先核对 entitlements。
 
-## DEV-006: pkd 进程僵死,新扩展登记不上
-- **Pitfall:** 新扩展 `pluginkit -a` 返回 0 但 `pluginkit -m` 查不到,反复登记无效。
-- **Cause:** pkd 内存会僵住,僵死的旧实例不响应新插件注册。
-- **Prevention:** 登记后查不到就 `killall pkd` 等几秒再查(`pluginkit -a` 重新登记)。只在登记失败时兜底,不写进例行流程。
-
-## DEV-007: LaunchServices 残留旧路径插件记录导致 pkd 拒绝扩展
-- **Pitfall:** pkd 解析到无效路径(如 build 目录里的旧 app/appex)而拒绝扩展。
-- **Cause:** LS 记录了旧路径的插件(重复构建产物留下的登记),优先于新路径被解析。
-- **Prevention:** 先 `lsregister -u` 所有旧路径的 app 及其 appex,再只注册 /Applications(手工配方见 DEV-092)。正常安装(拖进 /Applications)不会踩到,只在反复从 build 目录直接运行后出现。
-
 ## DEV-008: macOS Sequoia/Tahoe 覆盖安装后 Finder 右键菜单消失(陈旧扩展实例)
 - **Pitfall:** app 重建/覆盖安装后,扩展显示已启用(`pluginkit -m` 里是 `+`、设置页绿色),但 Finder 右键菜单不出现;手动关闭再开启一次即恢复。
 - **Cause:** pkd 与 Finder 仍持有旧扩展实例;只有切换 election 或重启 Finder 才会重新拉起新实例。
-- **Prevention:** **不再由 app 自愈**——扩展只当右键菜单注入器,app 不碰 election、不数进程、不管起停(见 DEV-091),陈旧实例只能手动处理:系统设置「登录项与扩展」里把 zeroflow 的 FinderSync 关开一次,或 `killall Finder`。历史方案(启动 2s 后 `pluginkit -e ignore → -e use` 翻转 election + `pgrep` 杀多余实例 + 设置页「刷新右键菜单扩展」按钮 + `scripts/install-findersync.sh`)已整体删除:一次翻转会起两个实例(DEV-091),副作用比问题本身更烦。
-
-## DEV-009: Finder 右键菜单位置无法调整
-- **Pitfall:** 尝试把扩展的右键菜单项放到菜单顶部/中间,无法实现。
-- **Cause:** 菜单项被 Finder 硬编码在菜单底部,无 API 可调整位置。
-- **Prevention:** 放弃调序,接受固定位置。
+- **Prevention:** **不由 app 自愈**——app 不碰 election、不数进程、不管起停(见 DEV-091)。陈旧实例只能手动处理:系统设置「登录项与扩展」里把 zeroflow 的 FinderSync 关开一次,或 `killall Finder`。历史方案(启动 2s 后翻 election + `pgrep` 收尸 + 设置页刷新按钮 + `scripts/install-findersync.sh`)已整体删除,勿复活(一次翻转起两个实例,见 DEV-091)。
 
 ## DEV-010: 不要用 `UserDefaults(suiteName:)` 读 App Group
 - **Pitfall:** 沙盒扩展里读不到主 app 写入的设置,cfprefsd 报 `Container: (null)`。
@@ -105,7 +75,7 @@
 ## DEV-021: macOS 窗口 frame 弹簧动画无公开 API,需主线程定时器积分实现
 - **Pitfall:** 灵动岛面板要做 iPhone 式「从刘海长出/缩回」的弹簧动画,`NSAnimationContext` 只支持贝塞尔 `CAMediaTimingFunction`,`CASpringTimingFunction` 在 macOS 不公开,窗口 frame 无法用系统弹簧曲线动画。
 - **Cause:** NSWindow 经 animator() 可动画的属性走 Core Animation 但只暴露贝塞尔曲线;UIKit 语义的弹簧参数(response/dampingFraction)动画必须自己积分。
-- **Prevention:** 主线程 120Hz `Timer` 对弹簧微分方程半隐式欧拉积分(k=(2π/response)²,c=2ζ√k)后直接 `setFrame(_:display:)`(dt 远小于稳定域 2/ω 不会发散);打断续接需用各分量当前值与速度重建弹簧、作废旧动画的 completion(否则收起的 orderOut 会在重展开后误触发);Timer 必须加进 `.common` mode,否则面板按钮的事件跟踪期间动画冻结。「先横向后纵向但要连续」的路径感无法靠单弹簧分量参数差做出(各分量同时起跳,前 ~0.3s 都走完大半路程,参数差拉不开视觉差距),必须中途交接:引导段用临界阻尼(ζ=1,无回弹)弹向中间目标,引导分量位移进度达阈值(如 85%)时以当前值/速度重定向到终目标(`NotchSpringAnimator.Handoff`),段间才无停顿无回弹。参考 `NotchPanelView.swift` 的 `NotchSpringAnimator`。
+- **Prevention:** 主线程 120Hz `Timer` 对弹簧微分方程半隐式欧拉积分(k=(2π/response)²,c=2ζ√k)后直接 `setFrame(_:display:)`(dt 远小于稳定域 2/ω 不会发散);打断续接需用各分量当前值与速度重建弹簧、作废旧动画的 completion(否则收起的 orderOut 会在重展开后误触发);Timer 必须加进 `.common` mode,否则面板按钮的事件跟踪期间动画冻结。分段「交接」(`NotchSpringAnimator.Handoff`)曾用于做「先横向后纵向」,已废弃:单段弹簧靠宽/高 response 与 ζ 差就能拉开层次,中途换道只会顿挫(见 DEV-040)。参考 `NotchPanelView.swift` 的 `NotchSpringAnimator`。
 
 ## DEV-022: 窗口弹簧动画里 alpha 走独立快速淡入,会把「生长」动画感知成「从一侧滑入」
 - **Pitfall:** 灵动岛面板做「从刘海长出」弹簧动画,frame 用弹簧、alpha 用独立的 0.15s 快速淡入:用户看到的是半透明面板从一侧快速滑到位 + 渐显,完全不是「从刘海逐渐长大」,方向感全错。
@@ -177,17 +147,10 @@
 - **Cause:** `.nonactivatingPanel` 只表示「点击本窗口不激活 app」,并不让它成为 key window;`canBecomeKey = false` 时本 app 又没有全局事件 tap 转发按键(灵动岛/Dock 预览靠 listen-only CGEventTap 拿输入,剪贴板面板不装 tap),于是永远收不到键盘。
 - **Prevention:** 想「不激活 app 也能打字」,`styleMask` 用 `.borderless + .nonactivatingPanel`、`canBecomeKey = true`、`becomesKeyOnlyIfNeeded = false`,`makeKeyAndOrderFront` 后断言 `isKeyWindow == true`(本项目其余面板故意保持 false,别顺手改);兜底分支一旦 `NSApp.activate`,真的会抢走前台,必须记住 `previousApp` 并在收起/粘贴前 `NSRunningApplication.activate` 还原,否则合成 ⌘V 会打到自己身上;方向键/回车/esc 用 `NSEvent.addLocalMonitorForEvents(.keyDown)` 按 `event.window === panel` 拦截并吞掉,其余按键放行给 SwiftUI `TextField`(输入法搜索依赖它)。
 
-## DEV-036: 面板贴插入点弹出：AX 坐标是「主屏左上为原点」，且必须在面板成为 key 之前取
-> **已废弃**：剪贴板面板已改为鼠标定位，不再取插入点；本条仅作历史记录。
-- **Pitfall:** 用 `kAXFocusedUIElementAttribute` + `AXBoundsForRange` 拿 caret 矩形后直接当 Cocoa 坐标用,面板出现在屏幕另一半;或热键里先 `makeKeyAndOrderFront` 再取焦点,拿到的永远是面板自己的搜索框,锚点跑到面板上。
-- **Cause:** AX 的全屏坐标原点在主屏**左上角**(y 向下),Cocoa 原点在主屏**左下角**;非激活面板一旦成为 key window,系统焦点即转移,`AXFocusedUIElement` 变成我们的 `TextField`。
-- **Prevention:** 坐标换算 `cocoaY = NSScreen.screens[0].frame.maxY - axRect.maxY`,并用 `NSScreen.screens` 的 `frame.intersects` 判断落屏;取 caret 的时机固定在 `makeKeyAndOrderFront` **之前**,并用 `AXUIElementGetPid != 自己` 兜底跳过自身;`AXUIElementSetMessagingTimeout(0.25)` 防目标 app 卡死拖住热键;密码框(`AXSecureTextField`)直接放弃定位;拿不到 caret 时按「元素 frame → 鼠标位置」降级。
-
 ## DEV-037: 液态玻璃作为窗口背景要放在 hosting 之下当兄弟视图，圆角各自设
 - **Pitfall:** 把 `NSGlassEffectView` 当 SwiftUI `.background` 或反过来把 hosting 塞进 `glass.contentView`,要么玻璃不出现(被宿主裁剪/不参与窗口背后采样),要么窗口宽高被 SwiftUI 固定 frame 钳死(DEV-024)。
 - **Cause:** 液态玻璃是窗口级合成效果,必须整块铺满窗口底层;`contentView` 承载 SwiftUI 会经约束链反向钳制窗口尺寸。
 - **Prevention:** `contentView` 用普通 `NSView` 容器:先 `addSubview(glass)`(frame=bounds、autoresizingMask=[w,h]、`cornerRadius` 自己设),再 `addSubview(hosting)` 盖在上面(同样只用 autoresizing);不要给容器加 `masksToBounds`(会把玻璃/磨砂裁掉),圆角分别设在玻璃(`cornerRadius`)或磨砂(`layer.cornerRadius + masksToBounds`)上;外观、降低透明度、Liquid Glass 强度全交给系统原生玻璃,**不要**再叠 `tintColor`/不透明底/描边(会和系统效果打架、也看不出滑杆效果),也不要用 `alphaValue` 调玻璃透明度(会连内容一起透明)。
-
 
 ## DEV-038: 自动隐藏 Dock 时 AX 报的是「隐藏位」坐标，Dock 预览的触发区/闸门会整体偏出屏幕
 - **Pitfall:** 开启 Dock 自动隐藏后，Dock 预览「偶尔能弹」:鼠标停在图标上大概率不弹,只有贴到屏幕最底一条缝才弹。日志里的 Dock 项缓存 bbox 是 `(410, 961, 588, 54)`,而屏幕只有 `1470×956` —— 整条落在屏幕底边之外。
@@ -210,25 +173,17 @@
 - **Prevention:** 模式判定下沉到决策点：异步收起闭包内再校验 `triggerMode == .hover`；`hidePanel` 只在悬停模式下置 `suppressReshow = true`（单击模式无悬停重弹问题，也不该留下永不清除的抑制位）。设置值直接读内存中的 `SettingsStore.shared`，不额外加通知，改设置后下一次交互即按新规则，已弹出的面板不受影响。
 
 ## DEV-042: 卡片切换滑动过渡要由面板弹簧时钟逐帧驱动，别赌 SwiftUI 首帧/隐式动画
-- **Pitfall:** 想在 `NSHostingView` 里做「旧卡滑出 / 新卡滑入」：一次把 `rootView` 换成终态、同一轮主线程把进度 0→1 再重建内容视图、或只在 `onAppear` 里 `withAnimation` 起跳，结果都只是一次瞬间替换，看不到过渡；`.animation(_:value:)` 也不动。另一个隐蔽问题：`.clipped()` 裁在整块面板宽上时，行程 `卡片宽 + 24` 不足以让旧卡完全滑出（面板宽 ≈ 卡片 + 2×(16+侧墙内缩)），终点会在留白里留一条旧卡边。
-- **Cause:** ① 0 与 1 落在同一次 SwiftUI 更新事务里会被合并成终态，「跳变」从未发生；② `onAppear` 不保证首帧 0 已经上屏（`NSHostingView` 挂载与首次提交常合并）；③ `hosting.rootView` 整体换值会换身份，隐式动画不跨身份插值；④ 旧卡若按新布局重排（列宽/内容高跟着变），滑动过程中还会变形。
-- **Prevention:** 进度不要交给 SwiftUI 自己起跳：面板持有 `CardSlideDriver`（`ObservableObject` + `@Published progress`），由 `NotchSpringAnimator` 的同一个 120Hz 时钟积分一路 slide 弹簧（response 0.32 / ζ1.0，临界阻尼零过冲），切卡时 `applyLayoutFrame`（形状弹簧）与 `animateSlide` 同轮启动；`allSettled` 必须同时看形状和 slide，否则形状无位移/先落定时 `stopTimer` 会把 slide 一起停掉。SwiftUI 侧只让两个 `SlideCard` 包装视图 `@ObservedObject` 观察进度（整个 `NotchContentView` 不要观察，避免日历/资源卡按 120Hz 重算），offset 公式：旧卡 `-step*travel*progress`、新卡 `step*travel*(1-progress)`。`CardSlide` 在切换时冻结 `travel = max(两卡宽)+24` 与 `viewportWidth = max(两卡宽)`；`contentSlot` 用 `.frame(width: viewportWidth, height: cardSlotHeight).clipped()` 再 `.frame(maxWidth: .infinity)`，裁在卡片区边界、顶部条/箭头不动。旧卡用「切换前几何」原样渲染（card/contentHeight/scale，列宽由卡宽反推）。方向语义：step = -1（上一张 / 左箭头 / 左滑）旧卡向右出、新卡自左入；+1 反向。双指方向要先把 delta 归一到同一基准：系统按自然滚动设置翻转 `scrollingDeltaX`，`isDirectionInvertedFromDevice == true` 时取原值、false 时取反；本机实测（自然滚动开，inverted=true）双指左滑累积为**正**、右滑为负，所以归一后 **> 0 才是左滑** → step -1（与左箭头完全一致），< 0 → +1。别按「左滑 = 负 delta」的直觉写映射——macOS 上报的符号与直觉相反；实机日志 `Notch swipe: raw dx=... inverted=... acc=... step=...` 是唯一可靠依据。断点：`present` 里 `slideDriver.progress = 1` + `cancelSlide()`；滑动落定后 `finishSlide()` 只走 `updateContentView` 清掉旧卡；`isSliding` 期间控制器忽略新的切换请求（连点不把当前卡瞬移回中心）。
-- **Note（本机验证手段）:** 这个环境里 `AXIsProcessTrusted()` 为 false，脚本点不了箭头；`screencapture` 与 `CGWindowListCreateImage` 都只返回空白/白图（缺屏幕录制权限），逐帧抓屏对比也不可行。要肉眼验证就用 `ZEROFLOW_NOTCH_SHOW=1` 起一个临时实例手动点箭头/双指滑动，别把「定时器自动切卡」这类测试钩子留在代码里。
+- **Pitfall:** 想在 `NSHostingView` 里做「旧卡滑出 / 新卡滑入」：一次把 `rootView` 换成终态、同一轮主线程把进度 0→1 再重建内容视图、或只在 `onAppear` 里 `withAnimation` 起跳，结果都只是瞬间替换，看不到过渡；`.animation(_:value:)` 也不动。另一个隐蔽问题：`.clipped()` 裁在整块面板宽上时，行程 `卡片宽 + 24` 不足以让旧卡完全滑出（面板宽 ≈ 卡片 + 2×(16+侧墙内缩)），终点会在留白里留一条旧卡边。
+- **Cause:** ① 0 与 1 落在同一次 SwiftUI 更新事务里会被合并成终态；② `onAppear` 不保证首帧 0 已上屏（`NSHostingView` 挂载与首次提交常合并）；③ `hosting.rootView` 整体换值会换身份，隐式动画不跨身份插值；④ 旧卡若按新布局重排（列宽/内容高跟着变），滑动过程中还会变形。
+- **Prevention:** 进度由面板自己的时钟驱动，不交给 SwiftUI：`CardSlideDriver`（`ObservableObject` + `@Published progress`）由 `NotchSpringAnimator` 同一个 120Hz 时钟积分一路 slide 弹簧（response 0.32 / ζ1.0，临界阻尼零过冲），切卡时 `applyLayoutFrame` 与 `animateSlide` 同轮启动；`allSettled` 必须同时看形状和 slide，否则形状先落定时 `stopTimer` 会把 slide 一起停掉。SwiftUI 侧只让两个 `SlideCard` 包装视图观察进度（整个 `NotchContentView` 不要观察，避免日历/资源卡按 120Hz 重算），offset：旧卡 `-step*travel*progress`、新卡 `step*travel*(1-progress)`。切换时冻结 `travel = max(两卡宽)+24` 与 `viewportWidth = max(两卡宽)`；`contentSlot` 用 `.frame(width: viewportWidth, height: cardSlotHeight).clipped()` 再 `.frame(maxWidth: .infinity)`，裁在卡片区边界、顶部条/箭头不动；旧卡用「切换前几何」原样渲染。
+- **方向语义:** step = -1（上一张 / 左箭头 / 左滑）旧卡向右出、新卡自左入；+1 反向。双指方向要先把 delta 归一：系统按自然滚动设置翻转 `scrollingDeltaX`，`isDirectionInvertedFromDevice == true` 时取原值、false 时取反；本机实测（自然滚动开，inverted=true）双指左滑累积为**正**，所以归一后 **> 0 才是左滑** → step -1，< 0 → +1。别按「左滑 = 负 delta」的直觉写——实机日志 `Notch swipe: raw dx=... inverted=... acc=... step=...` 是唯一可靠依据。
+- **断点:** `present` 里 `slideDriver.progress = 1` + `cancelSlide()`；滑动落定后 `finishSlide()` 只走 `updateContentView` 清掉旧卡；`isSliding` 期间控制器忽略新的切换请求（连点不把当前卡瞬移回中心）。
+- **Note（本机验证手段）:** 这个环境 `AXIsProcessTrusted()` 为 false，脚本点不了箭头；`screencapture` 与 `CGWindowListCreateImage` 只返回空白（缺屏幕录制权限）。肉眼验证用 `ZEROFLOW_NOTCH_SHOW=1` 起临时实例手动点，别把测试钩子留在代码里。
 
 ## DEV-043: 面板 contentView 从裸 hosting 换成容器后，`contentView?.fittingSize` 会失效
 - **Pitfall:** 给面板加玻璃背景（`glass + hosting` 兄弟结构）时把 `contentView` 从 `NSHostingView` 换成普通容器，随后 `centerOnMouseScreen` / `layoutAndPosition` 里用 `contentView?.fittingSize` 量内容尺寸会拿到 0/旧值——容器一般只装子视图、没有 Auto Layout 依赖，fittingSize 不等于 SwiftUI 的自然尺寸。
 - **Cause:** `fittingSize` 走的是约束/内在内容尺寸链，裸 `NSHostingView` 有 SwiftUI 内容的内在尺寸，容器没有。
 - **Prevention:** 液态玻璃面板统一用一个 `PanelHostingContainer`（玻璃垫底 + hosting autoresizing 跟随，DEV-037），并暴露 `contentFittingSize = hosting.fittingSize`；面板定位/定窗改量这个值，别再依赖 `contentView?.fittingSize`。玻璃层位置要么 autoresizing、要么在容器 `layout()` 里按 bounds 重设（内缩量也要在此补齐，否则尺寸变了玻璃边距不跟随）。
-
-## DEV-044: 新 SDK(27.x) 下合成鼠标事件的 API 形态变化
-- **Pitfall:** 写「检查鼠标是否按住」这类合成事件辅助逻辑时用老的 C 函数 `CGEventSourceButtonState(.combinedSessionState, .left)` 编译报错；顺手补的 `.middle` 也报 `CGMouseButton has no member 'middle'`。（该处代码来自已撤销的 Dock 快捷键弹出功能，API 形态结论仍然有效。）
-- **Cause:** 新 SDK 把 CoreGraphics 事件源的全局 C 函数换成了 `CGEventSource` 的实例/类型方法（`CGEventSource.buttonState(_:button:)`），且 Swift 侧 `CGMouseButton` 只暴露 `.left`/`.right`（`kCGMouseButtonMiddle` 其实存在但没桥接成 case，中键由右键 tap 监听覆盖即可）。
-- **Prevention:** 新 SDK 写合成事件相关代码时，事件源状态查询一律用 `CGEventSource(button/key)State(_ stateID:)` 系实例 API；遇到 `has been replaced by` 的报错直接改用提示的新形式，别套老 C 函数名。另：8 个 `(1 << CGEventType.xxx.rawValue)` 的 OR 长链别再包一层 `CGEventMask(...)` 括号函数调用，拆成 `let mask: CGEventMask = ... | ...` 逐行写，否则「compiler unable to type-check in reasonable time」。
-
-## DEV-045: 自动隐藏的 Dock 无法用「临时弹出」做快捷键预览（AXManualHide 在 macOS 26/27 已不存在）
-- **Pitfall:** 想做「按修饰键热键让自动隐藏的 Dock 短暂弹出看清图标」：合成 `mouseMoved` 把指针瞬移到屏幕边缘再移回，功能能看到弹出，但指针被瞬移会打断用户手上的指向/悬停（编辑器画线、拖拽、悬停卡片都跳），体验不可接受；改用未文档化 AX 属性 `AXManualHide` 的方案，在本机 macOS 26/27 上完全读不到该属性，功能无法实现，最终整体移除（不要再重新尝试这条路）。
-- **Cause:** ① Dock 的自动隐藏弹出只认物理指针贴边，基于指针的触发必然要动真实光标；② `AXManualHide` 只存在于旧版本 macOS 的 Dock AX 树，本机实测 Dock 进程 AX 子树共 17 个元素（AXApplication / AXList / AXDockItem×15），`AXUIElementCopyAttributeNames` 的属性列表里没有任何 `AXManualHide`，即使先 `AXUIElementSetAttributeValue(dockApp, "AXEnhancedUserInterface", kCFBooleanTrue)` 成功（err=0）也不会出现。
-- **Prevention:** 排查 Dock 的 AX 结构时注意 **`kAXWindowsAttribute` 在 Dock 上返回空数组**，Dock 的图标元素挂在 `kAXChildrenAttribute` 子树里（`DockHoverPreviewController` 的建缓存逻辑即按此枚举，DEV 见其 1121 行附近注释）；要按 role 递归枚举，别指望 `kAXWindowsAttribute`。想验证某个未文档化属性是否存在，用 `AXUIElementCopyAttributeNames` dump 整棵子树的 role + 属性名，再决定方案；若目标属性不存在，直接放弃功能，不要回退到移动指针的方案。
 
 ## DEV-046: 翻转鼠标滚轮只能走事件层,且必须区分鼠标/触控板与合成事件
 - **Pitfall:** 改系统「自然滚动」偏好(`com.apple.swipescrolldirection`)会把触控板一起反转;在 CGEventTap 里不区分来源,两指滚动也会被翻转;不排除 `eventSourceUnixProcessID != 0` 的事件,会和其他滚动工具(或驱动软件)叠加成双重反转。把 `DeltaAxis` 取反后立即读回 `PointDelta` 会发现系统已按倍数重算;若先写 Point/FixedPt 再写 DeltaAxis,取反结果被覆盖,方向偶发不生效。
@@ -292,10 +247,10 @@
 - **Prevention:** 构建时临时关掉编译器的子进程沙箱即可:`xcodebuild ... OTHER_SWIFT_FLAGS="-Xfrontend -disable-sandbox" build`(命令行传入,别写进 pbxproj)。`swiftc -Xfrontend -disable-sandbox -typecheck` 可先做最小复现验证。
 
 ## DEV-058: 多显示器下 Dock 悬停预览只在一块屏生效——Dock 的 AX 树只暴露一块屏的 Dock
-- **Pitfall:** 接了外接屏后,只有一块屏的 Dock 能弹预览,另一块屏怎么悬停都没反应(日志里连 `resolve` 都没有)。看起来像「副屏 Dock 的 AX 命中拿不到」,但真正的原因在触发阶段。
-- **Cause:** ① Dock 进程的 `kAXWindows` 恒为 0(实测),`dockBarFrameTL()` 永远是 nil;② Dock 应用元素的 `kAXChildren` 只有 **1 个 `AXList`**,里面是**一块屏**的图标(实测 14 项坐标全在主屏,指针移到另一块屏后这棵树不变——跟着主屏走,不跟指针走);`CGWindowList` 里 Dock 也只有 1 个窗口。③ 于是 `dockRegionTL()` 退化成「缓存项 bbox ± margin」,只覆盖那一块屏;另一块屏悬停时快路径不命中、又不在条带内 → `scheduleShow` 从不调度,流程在触发阶段就断了。④ 兜底 `isNearDockEdgeFallback` 只在条带为 nil 时可用,缓存有效时永远不可达,所以没有兜底。
+- **Pitfall:** 接了外接屏后,只有一块屏的 Dock 能弹预览,另一块屏怎么悬停都没反应(日志里连 `resolve` 都没有)。看起来像「副屏 Dock 的 AX 命中拿不到」,真正的原因在触发阶段。
+- **Cause:** ① `kAXWindows` 在 Dock 上恒为空(实测),`dockBarFrameTL()` 永远是 nil;② Dock 应用元素的 `kAXChildren` 只有 **1 个 `AXList`**,里面是**一块屏**的图标(实测 14 项坐标全在主屏,指针移到另一块屏后这棵树不变——跟着主屏走,不跟指针走);`CGWindowList` 里 Dock 也只有 1 个窗口。③ 于是 `dockRegionTL()` 退化成「缓存项 bbox ± margin」,只覆盖那一块屏;另一块屏悬停时快路径不命中、又不在条带内 → `scheduleShow` 从不调度,流程在触发阶段就断了。④ 兜底 `isNearDockEdgeFallback` 只在条带为 nil 时可用,缓存有效时永远不可达,所以没有兜底。
 - **Prevention:** 触发/闸门改成**每块屏各一条 Dock 边缘带**(`dockBandZonesTL`):用 `NSScreen.frame − visibleFrame` 量 Dock 所在边与厚度(自动隐藏时为 0,用常量 96/110pt 兜底),横向跨度用缓存条带宽度 ×1.2 居中到各屏(各屏 Dock 内容一致、宽度相同);「在不在图标上」只由 AX 权威命中判定。同时把坐标翻转基准从 `union.maxY` 改成**主屏**(Cocoa 原点所在屏)的 `maxY`,否则外接屏摆到主屏上方时全局 y 会整体偏移一块屏高;`placement` 改按 Dock 朝向判断,不再用缓存 bbox 的横竖。
-- **验证:** `defaults write com.zeroflow.app dockPreviewDebug -bool true` 后重启,副屏悬停应出现 `resolve pt=... item=...` 并弹面板;若日志只有 `not dock item, chain=...`,说明该屏 Dock 展开后仍不在 AX 树里(需换数据源),chain 里会直接给出命中的元素角色。
+- **验证:** `dockPreviewDebug` 打开后重启,副屏悬停应出现 `resolve pt=... item=...` 并弹面板;若日志只有 `not dock item, chain=...`,说明该屏 Dock 展开后仍不在 AX 树里(需换数据源),chain 里会直接给出命中的元素角色。
 
 ## DEV-059: Dock 贴左/右边时 AX 给的是退化坐标(16×0 挤在 (-10,0)),面板会飞到屏幕角落
 - **Pitfall:** 把 Dock 放到屏幕左侧/右侧后,悬停图标弹出的预览面板跑到屏幕左上角(甚至半截在屏外),而且卡片是横排的。看起来像「朝向判断错了」,其实是坐标本身就不可用。
@@ -307,26 +262,20 @@
 ## DEV-060: Dock 预览「鼠标还没走到面板上就消失」——`insetBy` 符号写反，保活区其实是内缩的
 - **Pitfall:** 预览面板弹出后想把鼠标移到面板上点卡片，结果一动就消失，慢一点根本够不到；越快越容易成功。看起来像「收起延迟太短」，调大也治不彻底。
 - **Cause:** 保活判定写的是 `anchorFrame.insetBy(dx: keepAliveInset, dy: keepAliveInset)`——`insetBy` 的**正值是内缩**（外扩要传负值，同文件里 `resolvedItemGateSlack` 就是 `-slack`）。于是保活区比图标/面板各自**小** 6pt，而面板底边离图标顶边只有 2pt：图标上沿到面板下沿之间凭空多出一条 `6 + 2 + 6 = 14pt` 的死带。指针慢速穿过这条死带就会超过 200ms 宽限，面板当场收起。
-- **Prevention:** ① 外扩一律写 `insetBy(dx: -keepAliveInset, ...)`（`NotchHotspotController` 同款写法可对照）；② 除两个矩形各自外扩外，再用「图标 → 面板」走廊（`isInTransitCorridor`：沿朝向轴从图标边缘延伸到面板边缘、横截面取图标跨度）兜住两者之间的缝——**不要**改判 `anchor ∪ panel` 的包围矩形，它在底部 Dock 下会横向吞掉整条 Dock 邻域（含所有隔壁图标），导致「移到无窗口图标上旧预览不收」，见 DEV-065；③ `.visible` 时若指针命中「另一个图标」，先用「图标 → 面板」走廊（`isInTransitCorridor`：沿朝向轴从图标边缘延伸到面板边缘、横截面取图标跨度）挡一道——放大 Dock 下缓存几何会整体漂移，上行途中很容易误命中隔壁图标，一旦按「换目标」处理就会 `softHidePanel` 掉刚弹出的面板；④ 弹出/收起两个延时都做成设置页滑杆（`dockPreviewHoverDelayMs` / `dockPreviewHideDelayMs`，后者默认 500ms），每次调度时现读，改滑杆即时生效。
+- **Prevention:** ① 外扩一律写 `insetBy(dx: -keepAliveInset, ...)`（`NotchHotspotController` 同款写法可对照）；② 除两个矩形各自外扩外，再用「图标 → 面板」走廊（`isInTransitCorridor`：沿朝向轴从图标边缘延伸到面板边缘、横截面取图标跨度）兜住两者之间的缝——**不要**改判 `anchor ∪ panel` 的包围矩形，它在底部 Dock 下会横向吞掉整条 Dock 邻域（含所有隔壁图标），导致「移到无窗口图标上旧预览不收」，见 DEV-065；③ `.visible` 时若指针命中「另一个图标」，先用同一走廊挡一道——放大 Dock 下缓存几何会整体漂移，上行途中很容易误命中隔壁图标，一旦按「换目标」处理就会 `softHidePanel` 掉刚弹出的面板；④ 弹出/收起两个延时都做成设置页滑杆（`dockPreviewHoverDelayMs` / `dockPreviewHideDelayMs`，后者默认 500ms），每次调度时现读，改滑杆即时生效。
 - **验证:** `defaults write com.zeroflow.app dockPreviewDebug -bool true` 后慢速把指针从图标移到面板：日志不应出现 `hide (left icon+panel region)`；滑杆把「收起延迟」拉到 2000ms 后，离开图标再移回面板应能救回同一个面板。
 
 ## DEV-061: 鼠标去面板途中蹭到隔壁图标 → 当前面板立刻被收掉（「换目标先 softHide」的代价）
 - **Pitfall:** 面板弹出后往面板上移，途中手一抖压到隔壁图标，当前面板当场消失，得重新悬停。越靠边的图标越容易中招（面板居中后两侧都是别的图标）。
-- **Cause:** `.visible` 里「命中另一个图标」的分支原本会 `softHidePanel()`（视觉上立刻 `orderOut`，状态留在 visible 等新目标重弹）。它存在的原因是**换目标时要避免旧内容残留**：新目标还要走 `hoverDelay` 才解析出窗口，这段空窗里若继续显示旧 app 的卡片，用户会以为点的是新 app 的窗口。但「蹭一下就走」和「真的停在隔壁」在缓存几何上看不出区别，于是路过也按换目标处理 → 面板秒收；而 300ms 后新目标在指针已经移到面板/空中时解析必然失败，`failResolve` 又把面板硬收一次，用户根本来不及。
-- **Prevention:** ① 换目标**不再**预先 softHide（函数已删）：旧面板留着，新目标到期由 `present` 复用同一面板原位换内容，解析失败见下条；② `failResolve` 增加「保面板」分支——面板开着且指针仍在 `isInKeepAliveRegion`（图标∪面板外扩 + 并集走廊）里时，只作废这次 show（`pendingShowGen = nil; showGen += 1; hideGen += 1`），面板与状态原样保留，去留交给保活/收起延迟；指针真的离开了才 `hidePanel`；③ `present` 成功后 `hideGen += 1`，作废「按旧锚点算出来」的宽限隐藏——否则指针停在隔壁图标不动时没有 move 事件来 bump，新面板会在 500ms 后被那条旧定时器收掉。
+- **Cause:** `.visible` 里「命中另一个图标」原本会 `softHidePanel()`（视觉上立刻 `orderOut`，状态留在 visible 等新目标重弹）。它存在是为了**换目标时避免旧内容残留**：新目标要走 `hoverDelay` 才解析出窗口，这段空窗里若继续显示旧 app 的卡片，用户会以为点的是新 app 的窗口。但「蹭一下就走」和「真的停在隔壁」在缓存几何上看不出区别，于是路过也按换目标处理 → 面板秒收；而 300ms 后新目标在指针已移开时解析必然失败，`failResolve` 又把面板硬收一次。
+- **Prevention:** ① 换目标**不再**预先 softHide（函数已删）：旧面板留着，新目标到期由 `present` 复用同一面板原位换内容；② `failResolve` 增加「保面板」分支——面板开着且指针仍在 `isInKeepAliveRegion`（图标∪面板外扩 + 并集走廊）里时，只作废这次 show（`pendingShowGen = nil; showGen += 1; hideGen += 1`），面板与状态原样保留，去留交给保活/收起延迟；③ `present` 成功后 `hideGen += 1`，作废「按旧锚点算出来」的宽限隐藏——否则指针停在隔壁图标不动时没有 move 事件来 bump，新面板会在 500ms 后被那条旧定时器收掉。
 - **验证:** 悬停图标 A 出面板 → 指针斜着蹭过隔壁图标 B 再移到面板上：面板应保持（日志出现 `keep panel, resolve miss (...)` 而不是 `hide (...)`）；停在 B 上不动 ≥300ms 才应该换成 B 的内容。
 
-## DEV-062: 副屏预览能弹出、但「移到隔壁图标」不换内容——换目标判定只走了缓存快路径
-- **Pitfall:** 主屏一切正常；副屏悬停图标能弹出缩略图，但指针移到旁边的图标上，面板内容不切换（主屏同操作会换）。看起来像「换目标逻辑坏了」，其实主屏根本没走到那段代码。
-- **Cause:** `.visible` 里「换到隔壁图标」靠 `cachedItem(at:)` 命中不同 id 来判定。而 Dock 的 AX 树只暴露**一块屏**的图标（DEV-058），副屏 Dock 的图标坐标压根不在 `dockItems` 里 → `hit` 恒为 nil → 换目标分支永远不进；于是指针离开当前图标后只剩「保活失败 → 宽限隐藏」一条路，表现为面板要么不换、要么过一会儿自己收掉。触发/解析本身没问题：`resolveTarget` 走的是 `AXUIElementCopyElementAtPosition` 系统级命中测试，对任意屏都有效。
-- **Prevention:** `.visible` 里补一条「缓存没覆盖」的换目标通道——指针不在保活区、但仍在 Dock 边缘带（`isNearDockStrip`，带是每屏各一条）里时，按 `hoverDelay` 重新走一次 AX 权威命中：命中同一图标内容不变，命中隔壁则 `present` 原位换内容。同时因为 `scheduleShow` 会置 `pendingShowGen`，宽限隐藏不会在这段窗口里把面板收掉。
-- **验证:** `defaults write com.zeroflow.app dockPreviewDebug -bool true` 后在副屏从一个图标平移到隔壁，日志应出现第二条 `resolve pt=... item=...` 且 `show ... placement=... anchor=...` 的 anchor 变成新图标；主屏行为不变（走缓存快路径，没有额外 resolve）。
-
 ## DEV-063: 副屏「换隔壁图标」彻底修好——把缓存布局跨屏投影，别指望 AX 覆盖所有屏
-- **Pitfall:** DEV-062 给副屏补了「按延时重走 AX 权威命中」的换目标通道，但实测仍不换内容。日志里能看到副屏 Dock 的图标坐标根本不在缓存里（`strip` 落在另一块屏），`hit` 恒为 nil；而 AX 命中在副屏上也不一定给出图标项（Dock 的 AX 树只暴露一块屏，见 DEV-058）。
-- **Cause:** 换目标、右键抑制、`hoverItemID` 全部建立在 `cachedItem(at:)` 上，而这个缓存只有一块屏的坐标；副屏唯一能用的 AX 权威命中又不可靠。等于副屏没有任何「这是哪个图标」的信息来源。
-- **Prevention:** 在 `cachedItem(at:)` 里做**跨屏投影**——各屏 Dock 内容/尺寸完全一致、底部 Dock 各自居中、侧边 Dock 各自贴边，所以把整条缓存布局按「屏幕中心/屏幕边」平移到指针所在屏即可命中：底部 `dx = to.midX − from.midX, dy = to.maxY − strip.maxY`（`strip.maxY` 取缓存条带下沿，缓存处于自动隐藏的「隐藏位」时同样成立），侧边同理按 `minX/maxX` 对齐。投影后 `cachedItem` 一并返回**投影后的 frame**，`resolveAndShow` 的兜底与锚点都用它，面板才贴在副屏图标上。同时把 `ResolveOutcome` 拆出 `menuElement`，让 `notDockElement` 也能走缓存兜底（右键菜单仍不兜底）。
-- **附带坑:** `cachedItem` 持锁期间**不能**调 `dockEdge()`——它的兜底分支会调 `dockStripTL()` 再取锁，`NSLock` 不可重入会死锁；改用纯读的 `Self.dockOrientationRaw()`（只读 `com.apple.dock orientation`）。
+- **Pitfall:** 上一版给副屏补的「按延时重走 AX 权威命中」实测仍不换内容：副屏图标坐标不在缓存里（`strip` 落在另一块屏），`hit` 恒为 nil，而 AX 命中在副屏上也不一定给出图标项（DEV-058）。
+- **Cause:** 换目标、右键抑制、`hoverItemID` 全部建立在 `cachedItem(at:)` 上，而这个缓存只有一块屏的坐标 → 副屏没有任何「这是哪个图标」的信息来源。
+- **Prevention:** 在 `cachedItem(at:)` 里做**跨屏投影**——各屏 Dock 内容/尺寸完全一致、底部各自居中、侧边各自贴边，把整条缓存布局按「屏幕中心/屏幕边」平移到指针所在屏即可命中：底部 `dx = to.midX − from.midX, dy = to.maxY − strip.maxY`（`strip.maxY` 取缓存条带下沿，自动隐藏的「隐藏位」同样成立），侧边同理按 `minX/maxX` 对齐。投影后 `cachedItem` 一并返回**投影后的 frame**，`resolveAndShow` 的兜底与锚点都用它，面板才贴在副屏图标上。同时把 `ResolveOutcome` 拆出 `menuElement`，让 `notDockElement` 也能走缓存兜底（右键菜单仍不兜底）。
+- **附带坑:** `cachedItem` 持锁期间**不能**调 `dockEdge()`——它的兜底分支会调 `dockStripTL()` 再取锁，`NSLock` 不可重入会死锁（同 DEV-059 附带坑）；改用纯读的 `Self.dockOrientationRaw()`。
 
 ## DEV-064: 换图标偶发失败的真凶——放大动画期间 AX 命中抖动，一次失败就判「不在图标上」
 - **Pitfall:** 副屏（或任何屏）沿 Dock 平移换图标时**时好时坏**：同一手势有时能换、有时面板直接收起；换个速度又好了。日志里同一个坐标相隔 170ms 两次解析结果完全不同。
@@ -335,56 +284,43 @@
 - **排查提示:** `DockHoverPreview: started (rev=...)` 会打印代码版本标记——怀疑「改了代码但跑的还是旧二进制」时先看这条；另外 `open` 一个已在运行的 app 只会激活旧进程，**必须**先 `pkill -f "Zeroflow.app/Contents/MacOS/Zeroflow"` 再 `open`。
 
 ## DEV-065: Dock 预览「移到没有窗口的图标上，旧预览不消失」——保活区用了 图标∪面板 的包围矩形
-- **Pitfall:** 悬停有窗口的图标 A 弹出预览，指针平移到隔壁**没有窗口**的图标 B 上，A 的预览一直挂着不收；若 B 有窗口则能正常原位换内容。看起来像「无窗口目标没触发收起」，实际是保活判定把 B 也圈了进去。
-- **Cause:** `isInKeepAliveRegion` 除图标/面板各自外扩，还判了 `anchor.union(panel)` 的包围矩形（DEV-060 ② 的旧做法）。底部 Dock 下该矩形横向从「图标最左」跨到「面板最右」，而面板远宽于图标 → 整条 Dock 邻域（含所有隔壁图标）都落在保活区里。于是指针停在 B 上时两条路都卡住：① `.visible` 的 `keepAlive` 为 true，只 `bumpHideGen()`，连权威命中都不再走；② 若先进了换目标分支（缓存命中 B 且不在走廊），`resolveAndShow` 对 B 得到空窗口列表 → `failResolve` 的「keep panel」分支又因保活区命中而保留旧面板。
-- **Prevention:** 保活区改为「图标自身 ∪ 面板自身 ∪ `isInTransitCorridor` 走廊」，**删掉并集分支**：走廊沿朝向轴从图标边缘延伸到面板边缘、横截面只取图标跨度（再外扩 `keepAliveInset`），缝隙照样覆盖，但不会横向吞掉邻域。`failResolve` 复用同一函数，于是「指针停在别的图标上且该目标无窗口」自然落进收起分支——且是立即收，不等收起延迟。
-- **代价:** 从图标**斜向**移向面板角落时可能短暂出走廊，触发一次收起延迟（默认 500ms）；指针进面板后 `bumpHideGen` 取消。观感上是一次可配置延迟，不会闪。
-- **验证:** 悬停有窗口的 A → 平移到隔壁无窗口的 B：日志应出现 `hide (target has no windows)` 而不是 `keep panel, resolve miss (target has no windows)`；平移到有窗口的 C 仍原位换内容；慢速从 A 移向面板仍不掉（DEV-060 的验证照旧通过）。
+- **Pitfall:** 悬停有窗口的图标 A 弹出预览，指针平移到隔壁**没有窗口**的图标 B 上，A 的预览一直挂着不收；若 B 有窗口则能正常原位换内容。
+- **Cause:** `isInKeepAliveRegion` 除图标/面板各自外扩，还判了 `anchor.union(panel)` 的包围矩形（DEV-060 ② 的旧做法）。底部 Dock 下该矩形横向从「图标最左」跨到「面板最右」，而面板远宽于图标 → 整条 Dock 邻域（含所有隔壁图标）都落在保活区里。于是指针停在 B 上时两条路都卡住：① `.visible` 的 `keepAlive` 为 true，只 `bumpHideGen()`，连权威命中都不再走；② 若先进了换目标分支，`resolveAndShow` 对 B 得到空窗口列表 → `failResolve` 的「keep panel」分支又因保活区命中而保留旧面板。
+- **Prevention:** 保活区改为「图标自身 ∪ 面板自身 ∪ `isInTransitCorridor` 走廊」，**删掉并集分支**：走廊沿朝向轴从图标边缘延伸到面板边缘、横截面只取图标跨度（再外扩 `keepAliveInset`），缝隙照样覆盖，但不会横向吞掉邻域。`failResolve` 复用同一函数，「指针停在别的图标上且该目标无窗口」自然落进立即收起分支。
+- **代价:** 从图标**斜向**移向面板角落时可能短暂出走廊，触发一次收起延迟（默认 500ms）；指针进面板后 `bumpHideGen` 取消。
+- **验证:** A（有窗口）→ B（无窗口）：日志应出现 `hide (target has no windows)` 而不是 `keep panel, resolve miss (...)`；A → C（有窗口）仍原位换内容。
 
 ## DEV-066: 自动隐藏 Dock 时「Dock 没展开也弹预览」，以及偶发「面板过于偏下」——两条链路都缺「Dock 真的在屏上」这个判据
 - **Pitfall:** ① 系统设置 Dock 自动隐藏后，鼠标移到屏幕下方（Dock 还没推出来）仍然弹出预览面板；② 极小概率面板位置偏下（半截压在屏幕底边之外），或「Dock 还没滑完就弹，位置算错」。
-- **Cause:** 两条问题同源，代码里没有任何「Dock 当前是否真的展开」的判据，几何全靠「屏幕边缘 + 缓存投影」推：
-  ① 触发带厚 `bottomBandMinThickness = 96` + `stripTriggerMargin = 30`，屏幕底部 126pt 都算「靠近 Dock」（真实图标行只有 ~54pt）；`cachedItem` 的跨屏投影（DEV-063）把隐藏位条带按 `to.maxY − strip.maxY` 抬到「展示位」，于是 Dock 明明没展开，缓存也给出一个落在图标行内的假命中。延时到期后 `resolveTarget` 返回 `notDockElement`（正确），`resolveAndShow` 的**缓存兜底**照样接受这个投影 frame；位置闸门 `isInDockZone` 又是按屏幕边推的、与命中项无关 → 放行 → 面板弹出。
-  ② 展开动画中途 AX 命中给出的 frame 尺寸正常但位置偏低（隐藏位/插值位），`sanitizedAnchor` 只挡退化 frame（宽高 < 8）→ 原样当锚点；`DockPreviewPanel.layoutAndPosition` 的 `.above` 只钳 x **不钳 y**（`origin.y = anchorCocoa.maxY + 2`），锚点在屏幕外时 `origin.y` 变负 → 面板只剩上半截可见。重试机制（DEV-064 放宽成「只要在带内」）只覆盖「解析失败」，**「解析成功但 Dock 还在滑」这条路径没有任何等待**。
-- **Prevention:** ① 新增 `dockRevealState(at:)` 三态判据，上屏前必须不是 `.hidden`：**主判据** `liveDockStripTL()` 读 Dock 应用元素子元素（唯一那个 AXList）的**实时** frame（不能用缓存，缓存会长期停在隐藏位），只比「沿 Dock 边法线的贴合程度」（`gap ≤ revealFlushTolerance = 6`）——**不比面积**，放大动画期间条带会横向撑开约 30%，按面积比会误判成「没展开」导致面板永不弹出；**副判据** `dockEdgeArmed`（指针贴过 Dock 那条边 `revealSliver = 6`，系统只在贴边时推出 Dock）**只放行不否决**，只在主判据判不出来（多显示器副屏 / 侧边 Dock 退化坐标 / AX 读不到）时生效，判不出来仍按旧行为放行——宁可保留偶发误弹，也不让这些配置直接失效。② 锚点体检：命中项/投影 frame 的中心必须在指针所在屏内（外扩 2pt），否则 `failResolve` 走重试预算等展开动画。③ `layoutAndPosition` 四个朝向的 origin 一律钳进 `screen.frame`（内缩 8pt），锚点再错也不会把面板推出屏幕。
-- **代价:** 自动隐藏时「贴边 → Dock 展开 → 面板出现」多等约一个展开动画（重试 0.12s/次，预算 1.2s），观感是面板晚 0.1–0.2s 出来，不会闪。
-- **验证:** `defaults write com.zeroflow.app dockPreviewDebug -bool true` 后重启（**必须**先 `pkill -f "Zeroflow.app/Contents/MacOS/Zeroflow"` 再 `open`，见 DEV-064）。① 指针移到屏幕底部但**不贴边**（Dock 保持收起）→ 日志应出现 `dock not revealed ... liveStrip=...`，不弹面板；② 贴边展开 Dock 后悬停图标 → 日志 `resolve ... reveal=revealed`，面板贴在图标上方；③ 快速划过 Dock 底部 → 面板不应出现位置偏移；④ 若出现「自动隐藏时预览完全不弹」且日志里 `reveal=hidden` 而 `liveStrip` 的 frame 明明已贴住屏幕底边，说明该屏 Dock 的贴合余量超过 `revealFlushTolerance`（6pt），把它放大到 10–12pt 即可（不要直接删判据）。
+- **Cause:** 两条问题同源：代码里没有任何「Dock 当前是否真的展开」的判据，几何全靠「屏幕边缘 + 缓存投影」推。① 触发带厚 `bottomBandMinThickness = 96` + `stripTriggerMargin = 30`，屏幕底部 126pt 都算「靠近 Dock」（真实图标行只有 ~54pt）；`cachedItem` 的跨屏投影（DEV-063）把隐藏位条带抬到「展示位」，于是 Dock 没展开也给出假命中。`resolveTarget` 虽正确返回 `notDockElement`，但缓存兜底照样接受这个投影 frame，位置闸门 `isInDockZone` 又与命中项无关 → 放行。② 展开动画中途 AX 给的 frame 尺寸正常但位置偏低，`sanitizedAnchor` 只挡退化 frame（宽高 < 8）→ 原样当锚点；`layoutAndPosition` 的 `.above` 只钳 x **不钳 y**，锚点在屏外时 `origin.y` 变负 → 面板只剩上半截。重试机制（DEV-064）只覆盖「解析失败」，「解析成功但 Dock 还在滑」没有任何等待。
+- **Prevention:** ① 新增 `dockRevealState(at:)` 三态判据，上屏前必须不是 `.hidden`：**主判据** `liveDockStripTL()` 读 Dock 唯一那个 AXList 的**实时** frame（不能用缓存，缓存会长期停在隐藏位），只比「沿 Dock 边法线的贴合程度」（`gap ≤ revealFlushTolerance = 6`）——**不比面积**，放大动画期间条带会横向撑开约 30%，按面积比会误判成「没展开」导致面板永不弹出；**副判据** `dockEdgeArmed`（指针贴过 Dock 那条边 `revealSliver = 6`）**只放行不否决**，只在主判据判不出来（副屏 / 侧边退化坐标 / AX 读不到）时生效，判不出来仍按旧行为放行——宁可保留偶发误弹，也不让这些配置直接失效。② 锚点体检：命中项/投影 frame 的中心必须在指针所在屏内（外扩 2pt），否则走重试预算等展开动画。③ `layoutAndPosition` 四个朝向的 origin 一律钳进 `screen.frame`（内缩 8pt）。
+- **代价:** 自动隐藏时「贴边 → Dock 展开 → 面板出现」多等约一个展开动画（0.12s/次，预算 1.2s），观感晚 0.1–0.2s，不会闪。
+- **验证:** `dockPreviewDebug` 打开后重启（**必须**先 pkill 再 open，见 DEV-064）。① 移到屏幕底部但不贴边 → 日志 `dock not revealed ... liveStrip=...`，不弹；② 贴边展开后悬停 → `resolve ... reveal=revealed`；③ 快速划过底部 → 位置不应偏移；④ 若 `reveal=hidden` 而 `liveStrip` 明明已贴住屏幕底边，说明该屏贴合余量 > `revealFlushTolerance`，把它放大到 10–12pt（不要删判据）。
 
 ## DEV-067: 移到隔壁「无窗口」图标时旧预览迟迟不收——换目标判定用了放大态的过期快照，而不是当前实际几何
-- **Pitfall:** 悬停有预览的图标 A → 指针平移到隔壁**没有打开窗口**的图标 B：预期是立刻收掉 A 的预览（B 不弹）。实际指针进到 B 左半块时毫无反应，必须再往右移到 B 中间偏右才收。开启 Dock 放大（magnification）时明显，关掉放大几乎复现不出来。
-- **Cause:** 「指针是否还在当前图标上」完全由两份**过期快照**判定，而放大是连续动画，布局每一帧都在变：
-  ① `currentItemTL` 是 `present` 那一刻（指针压在 A 上、A 已放大到峰值）冻结的 AX frame，之后不再更新。本机实测 `tilesize=40` / `largesize=71`（放大 1.78×）、基准槽距 42pt（DEV-038 日志 588/14）→ 锚点每侧比槽位宽出 `(71−42)/2 ≈ 14.5pt`，再加 `keepAliveInset = 6` → 边界伸进 B 槽位约 **49%**，正好是「中间偏右」。
-  ② `cachedItem` 的 `dockItems` 是异步重建的缓存（0.3s 防抖），放大动画期间就是过期快照（DEV-064 实测条带宽度在 588/626/661/689 间跳），B 的 frame 被推右 → 指针在 B 左半块时缓存命中不到 B → `.visible` 的「换目标」分支不触发，只剩「离开保活区 → 500ms 宽限隐藏」一条路。
-  **要点：不是「放大后的尺寸不能用」，而是拿历史快照当当前布局。**面板定位需要冻结锚点（否则图标重排时面板会跟着晃），命中判定需要实时几何——两者共用同一个 rect 是设计缺口。
-- **Prevention:** 新增 `probeLiveSwitchIfNeeded`：`.visible` 且指针在 Dock 边带内、**沿 Dock 轴**位移 ≥ `liveProbeAxisDelta = 8pt` 时（节流 `liveProbeInterval = 100ms`）问一次 AX 权威命中「这个点是哪个图标」；命中另一个目标就 `scheduleShow(hoverDelay)` 走正常换目标流程。三条硬约束：① AX 调用**必须**异步跑在 `workQueue`——事件 tap 有响应超时，慢了会被系统直接停掉；② 只认沿 Dock 轴的位移，法线方向（图标→面板）不触发，否则会打掉 DEV-060/061 的保活语义；③ 指针在 `panelFrameTL` 内直接跳过（面板下沿可能压进边缘带）。配套：`failResolve` 增加 `differentTarget` 参数——实时命中已确认指针在**另一个**图标上且该目标无窗口时直接 `hidePanel`，不再问保活区；`currentTargetKey`（present 写入 / hidePanel / failResolve 清空）提供身份比对，`pendingSwitchKey` 防止连续 move 反复重置防抖。
-- **代价:** 面板显示且指针移动时最多 10 次/秒 AX 命中（静止悬停零开销）。AX 命中抖动仍由 1.2s 重试预算兜（DEV-064）。
-- **验证:** `dockPreviewDebug` 打开后 A → B(无窗口)：日志应出现 `switch by live hit pt=... -> app:...`，随后 `hide (target has no windows)`，面板在指针进入 B 后约 100–400ms 内收起（= 探测节流 + 换目标防抖），不再等走到 B 偏右。回归项：DEV-061 的「去面板途中蹭到隔壁图标」仍应是 `keep panel, resolve miss`；DEV-060 慢速从图标移到面板仍不掉。
+- **Pitfall:** 悬停有预览的图标 A → 指针平移到隔壁**没有打开窗口**的图标 B：预期立刻收掉 A 的预览，实际要走到 B 中间偏右才收。开启 Dock 放大（magnification）时明显，关掉放大几乎复现不出来。
+- **Cause:** 「指针是否还在当前图标上」完全由两份**过期快照**判定，而放大是连续动画，布局每帧都在变：① `currentItemTL` 是 `present` 那一刻（指针压在 A 上、A 已放大到峰值）冻结的 AX frame，之后不再更新——本机实测 `tilesize=40` / `largesize=71`、基准槽距 42pt，锚点每侧比槽位宽出 `(71−42)/2 ≈ 14.5pt`，再加 `keepAliveInset = 6` → 边界伸进 B 槽位约 **49%**，正好是「中间偏右」；② `cachedItem` 的 `dockItems` 是 0.3s 防抖的异步缓存，放大动画期间就是过期快照（DEV-064 实测条带宽度在 588/626/661/689 间跳），指针在 B 左半块时缓存命中不到 B → 换目标分支不触发，只剩「离开保活区 → 500ms 宽限隐藏」。**要点：不是「放大后的尺寸不能用」，而是拿历史快照当当前布局**——定位需要冻结锚点（否则图标重排时面板会晃），命中判定需要实时几何，两者共用同一个 rect 是设计缺口。
+- **Prevention:** 新增 `probeLiveSwitchIfNeeded`：`.visible` 且指针在 Dock 边带内、**沿 Dock 轴**位移 ≥ `liveProbeAxisDelta = 8pt` 时（节流 `liveProbeInterval = 100ms`）问一次 AX 权威命中「这个点是哪个图标」；命中另一个目标就 `scheduleShow(hoverDelay)` 走正常换目标流程。三条硬约束：① AX 调用**必须**异步跑在 `workQueue`——事件 tap 有响应超时，慢了会被系统停掉；② 只认沿 Dock 轴的位移，法线方向（图标→面板）不触发，否则会打掉 DEV-060/061 的保活语义；③ 指针在 `panelFrameTL` 内直接跳过。配套：`failResolve` 增加 `differentTarget` 参数——实时命中已确认指针在**另一个**图标上且该目标无窗口时直接 `hidePanel`；`currentTargetKey` 提供身份比对，`pendingSwitchKey` 防止连续 move 反复重置防抖。
+- **代价:** 面板显示且指针移动时最多 10 次/秒 AX 命中（静止悬停零开销）；抖动仍由 1.2s 重试预算兜（DEV-064）。
+- **验证:** A → B（无窗口）：日志应出现 `switch by live hit pt=... -> app:...` 后紧跟 `hide (target has no windows)`，指针进入 B 后约 100–400ms 内收起。回归：DEV-061 的「去面板途中蹭到隔壁」仍应是 `keep panel, resolve miss`；DEV-060 慢速移动仍不掉。
 
 ## DEV-068: 剪贴板面板展开预览时「整体闪一下」——窗口动画跑在 window server，内容重画在主线程
-- **Pitfall:** 剪贴板历史面板里某条记录停留超过 `clipboardPreviewDelayMs`（默认 1s）后，窗口从 360 长到 821 展开预览，整个面板闪一下：列表被横向拉宽再弹回。**文本只有 8 行也会出现**，跟内容体积无关。
-- **Cause:** `panel.animator().setFrame(_:display:)` 的动画由 window server 推进，不受主线程影响；而内容重画必须在主线程。SwiftUI 首次布局（哪怕只有 8 行文本）要 30–45ms，这段时间主线程不处理 resize 事件，窗口已经从 360 长到 560，backing store 还是 360 宽 → window server 只能把它横向拉宽去填新宽度 → 整块内容变形一下再弹回。实测时间轴（短文本）：窗口 `+45@560 +60@621 +77@676 ...`，内容 `+45@560 +60@621 +77@676 ...` —— 两者同步，说明 **app 在 +45ms 才第一次处理 resize，此时窗口早已 560**。停顿越长拉伸越久：短文本 45ms（≈3 帧），60KB 文本 425ms（≈25 帧）。换成纯色背景、关掉窗口动画，卡顿依旧（413 vs 416ms），证明与玻璃和动画无关，只与「主线程停顿 + 窗口动画不同步」有关。
-- **Prevention:** 四件事必须同时成立，缺一个就还会闪：
-  ① **内容与窗口尺寸解耦，而且 layer 必须已经覆盖展开态**：`ClipboardPanelView` 根视图固定展开态宽度 `ClipboardPanelMetrics.expandedWidth`（821），预览列宽度恒定占位（未展开时 `Color.clear`）；**`NSHostingView` 也必须固定 821 宽，只让高度跟随宿主**（`autoresizingMask = [.height]`）。只让 hosting 跟随窗口宽度是**不够**的：收起态窗口 360 宽，layer 的 backing store 也只有 360 宽，右侧 461pt 预览列压根没被光栅化，窗口生长时仍要靠主线程逐帧补画，主线程一停顿就回到拉伸老路——这正是「改完还偶发闪一下」的残留原因。定宽后预览列在动画起手前就已画完（app 内离屏取样：生长前右侧预览区已有 5406 个前景像素）。超宽部分由窗口自身裁掉，宿主 layer 默认不 masksToBounds。只用 autoresizing、不用约束、不挂 `glass.contentView`，不违反 DEV-024。
-  ② **渲染先于生长**：设完 `previewItem` 后在下一轮 runloop 里 `layoutSubtreeIfNeeded()` + `displayIfNeeded()`，再启动窗口动画（`expandPreview`）。顺序反了就是窗口先动、内容后画。
-  ③ **定宽内容必须用 `overlay(alignment:)` 钉在宿主左上**。`.frame(maxWidth: .infinity, alignment: .topLeading)` 在**子视图比宿主宽**时不会靠左，SwiftUI 会把整块内容**居中**：实测把 821 宽内容放进 360 宽宿主，左右各裁 230pt，列表只剩右半截，必须等窗口长到 821 才恢复正常。正确写法 `Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity).overlay(alignment: .topLeading) { 定宽内容 }`（`ZStack(alignment: .topLeading)` 同样会被居中，实测无效）。
-  ④ 窗口动画**仍用 `animator()`**（0.16s easeOut）。内容固定宽度 + layer 已预渲染后，动画期间零重排、零补画，不会再被拉伸。**不要改成自己开 60Hz 定时器逐帧 `setFrame`**：实测 10 帧共 18ms、单帧最大 2.6ms，视觉与 `animator()` 无差别，却让展开瞬间多占主线程，已回退。
-  ⑤ **两个方向都要像抽屉抽出，靠「把内容钉在不动的那条边」实现**（`pinHosting`）：预览在右 → hosting 钉窗口左边缘（`autoresizingMask = [.height]`，内容局部 0 是列表、右侧 461pt 是预览），窗口向右长；预览在左 → hosting 钉窗口右边缘（`autoresizingMask = [.minXMargin, .height]`，`frame.origin.x = 窗口宽 - 821`，内容局部 461 起是列表、左侧 460pt 是预览），窗口向左长。这样窗口无论朝哪边长，列表在屏幕上都不动，另一边就是把已经画好的预览「抽」出来。
-  **不要图省事让左展开直接瞬时到位**（早期就是这么绕的）：视觉上「啪」一下变宽，用户会当成动画丢了。也不用担心窗口原点移动导致内容错位——只要 hosting 钉对了边，AppKit 的 autoresizing 会逐帧把 `origin.x` 顶回去，列表始终贴在窗口那条不动的边上。
-  切钉法本身不产生跳变：收起态窗口 360 宽，两种钉法下列表都正好铺满窗口，所以 `previewOnLeft` 在收起时可以保持上次的方向、不必回切一次。
-  还有：**圆角裁剪要挪到宿主 layer**（`container.layer.cornerRadius + masksToBounds`），不能留在 821 宽的 SwiftUI 内容上——内容恒定 821 而收起态窗口只有 360，画在内容上的圆角会跑到窗口外面，右边缘变直角。
-- **代价:** hosting 定宽 821 让 backing store 变成窗口的 2.3 倍（2x 屏 821×422 约 5.5MB），面板 dismiss 时随内容树一起释放。窗口生长期间 hosting 每帧 `layout()` 仅 0.05–0.10ms（布局缓存命中；实测 60 帧共 1.38ms、单帧最大 0.09ms），首次插入约 3ms。
-- **验证:** `ZEROFLOW_CLIPBOARD_DEBUG=1` 启动，日志应只有一条 `frame -> ... preview=true ... animated=true`（幂等守卫挡住两条入口重复起手），并跟一条 `preview prerender ...`；收起态应看到完整列表（搜索栏 + 全部行 + 底栏）而不是半截。抽屉方向可在动画中途抓帧核对（`ZEROFLOW_PANEL_SNAPSHOT` 把延时调到 80ms）：右展开中途应是「列表完整在左 + 预览从右边露出一截」，左展开中途应是「预览从左边露出一截 + 列表完整在右」，两边都不该出现拉伸或错位。若又闪了，依次查：根视图是否被改回 `.frame(maxWidth: .infinity)`（内容跟着窗口逐帧重排）、hosting 是否又被改成跟随窗口宽度（预览列没被光栅化）、对齐是否用了 `.frame(alignment:)` 而不是 `overlay(alignment:)`（内容被居中裁切）、`pinHosting` 是否还跟着 `previewSide` 切边。
+- **Pitfall:** 剪贴板面板里某条记录停留超过 `clipboardPreviewDelayMs`（默认 1s）后，窗口从 360 长到 821 展开预览，整个面板闪一下：列表被横向拉宽再弹回。**文本只有 8 行也会出现**，跟内容体积无关。
+- **Cause:** `animator().setFrame(_:display:)` 的动画由 window server 推进，不受主线程影响；而内容重画必须在主线程。SwiftUI 首次布局（哪怕 8 行文本）要 30–45ms，这段时间主线程不处理 resize，窗口已从 360 长到 560，backing store 还是 360 宽 → window server 只能横向拉宽去填 → 内容变形再弹回。实测时间轴两者同步（窗口与内容都在 `+45@560`），说明 **app 在 +45ms 才第一次处理 resize，此时窗口早已 560**；停顿越长拉伸越久（60KB 文本 425ms ≈ 25 帧）。换纯色背景、关掉窗口动画卡顿依旧（413 vs 416ms），与玻璃/动画无关，只与「主线程停顿 + 窗口动画不同步」有关。
+- **Prevention:** 五件事必须同时成立，缺一个就还会闪：
+  ① **内容与窗口尺寸解耦，且 layer 必须已覆盖展开态**：`ClipboardPanelView` 根视图固定展开宽 `ClipboardPanelMetrics.expandedWidth`（821），预览列恒定占位（未展开时 `Color.clear`）；**`NSHostingView` 也必须固定 821 宽，只让高度跟随宿主**（`autoresizingMask = [.height]`）。只让 hosting 跟随窗口宽度**不够**：收起态窗口 360 宽，backing store 也只有 360 宽，右侧 461pt 预览列压根没被光栅化，窗口生长时仍要主线程逐帧补画——这正是「改完还偶发闪一下」的残留原因。超宽部分由窗口自身裁掉（宿主 layer 默认不 masksToBounds）；只用 autoresizing、不用约束、不挂 `glass.contentView`，不违反 DEV-024。
+  ② **渲染先于生长**：设完 `previewItem` 后下一轮 runloop 里 `layoutSubtreeIfNeeded()` + `displayIfNeeded()`，再启动窗口动画（`expandPreview`）。顺序反了就是窗口先动、内容后画。
+  ③ **定宽内容必须用 `overlay(alignment:)` 钉在宿主左上**：`.frame(maxWidth: .infinity, alignment: .topLeading)` 在**子视图比宿主宽**时不会靠左，SwiftUI 会把整块内容**居中**（实测 821 宽内容放进 360 宽宿主，左右各裁 230pt，列表只剩右半截）。正确写法 `Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity).overlay(alignment: .topLeading) { 定宽内容 }`；`ZStack(alignment: .topLeading)` 同样会被居中，实测无效。
+  ④ 窗口动画**仍用 `animator()`**（0.16s easeOut）：内容定宽 + layer 已预渲染后，动画期间零重排零补画。**不要改成自建 60Hz 定时器逐帧 `setFrame`**：实测与 `animator()` 无视觉差别（10 帧共 18ms），却让展开瞬间多占主线程，已回退。
+  ⑤ **两个方向都要像抽屉抽出，靠「把内容钉在不动的那条边」实现**（`pinHosting`）：预览在右 → hosting 钉窗口左边缘（`[.height]`，内容局部 0 是列表、右侧 461pt 是预览），窗口向右长；预览在左 → 钉窗口右边缘（`[.minXMargin, .height]`，`frame.origin.x = 窗口宽 - 821`，内容局部 461 起是列表、左侧 460pt 是预览），窗口向左长。这样列表在屏幕上不动，另一边就是把已画好的预览「抽」出来。**别让左展开瞬时到位**（早期做法，视觉上「啪」一下变宽）；也不用担心窗口原点移动导致错位——autoresizing 会逐帧把 `origin.x` 顶回去。两种钉法在收起态都正好铺满 360 宽，所以 `previewOnLeft` 收起时可保持上次方向、不必回切。**圆角裁剪要挪到宿主 layer**（`container.layer.cornerRadius + masksToBounds`）：画在 821 宽内容上的圆角会跑到窗口外，右边缘变直角。
+- **代价:** hosting 定宽 821 让 backing store 变成窗口的 2.3 倍（2x 屏 821×422 约 5.5MB），dismiss 时随内容树释放。窗口生长期间 hosting 每帧 `layout()` 仅 0.05–0.10ms，首次插入约 3ms。
+- **验证:** `ZEROFLOW_CLIPBOARD_DEBUG=1` 启动，日志应只有一条 `frame -> ... preview=true ... animated=true`（幂等守卫挡住重复起手）+ 一条 `preview prerender ...`；收起态应看到完整列表。抽屉方向用 `ZEROFLOW_PANEL_SNAPSHOT`（延时调到 80ms）抓帧核对：右展开中途是「列表完整在左 + 预览右侧露出一截」，左展开反之。若又闪了，依次查：根视图是否被改回 `.frame(maxWidth: .infinity)`、hosting 是否又跟随窗口宽度、对齐是否用了 `.frame(alignment:)`、`pinHosting` 是否还跟着 `previewSide` 切边。
 
 ## DEV-069: 系统 Now Playing 对第三方 app 是空的,「正在播放」必须另配 CoreAudio 出声探测
-
-- **Pitfall:** 灵动岛「正在播放」卡片对 QQ音乐、语音备忘录永远显示「没有正在播放的音乐」,而对 Chrome 却常年显示一个早已不存在的会话。用户报「没什么支持的」,看起来像读取 API 失效,实际是数据源根本不存在。
-- **Cause:** macOS 的 Now Playing 是**单一共享槽位**,只有 app 主动向 `MPNowPlayingInfoCenter` 上报才有数据。实测 macOS 27.2.1:QQ音乐(`com.tencent.QQMusicMac`)和语音备忘录(`com.apple.VoiceMemos`)播放中,`MRMediaRemoteGetNowPlayingClients` 返回**空数组**、`MRMediaRemoteGetNowPlayingApplicationPID` 返回 0、`MRNowPlayingRequest.localNowPlayingItem` 为 nil;与此同时 `localNowPlayingPlayerPath` 仍指向一个 Chrome 的 **paused 僵尸会话**(空闲后不释放,`localPlaybackState` 恒为 2)。即:读不到不是 API 被封,而是这两个 app 压根不上报;僵尸会话还会让「谁是当前播放器」的判断被带偏。
-- **Prevention:** 双源合并,`NowPlayingMonitor.read()`:
-  ① **MediaRemote 优先**:拿到 item 且其 bundleID 出现在出声列表里(或出声列表为空,可能是暂停态)→ 用完整信息(标题/歌手/进度,`canControl = true`)。
-  ② **CoreAudio 兜底**:`kAudioHardwarePropertyProcessObjectList` + `kAudioProcessPropertyIsRunningOutput == 1` 枚举正在出声的进程(macOS 14+ 公开 API,实测能准确抓到 QQ音乐与语音备忘录),用 `NSRunningApplication` 取 bundleID/localizedName 做降级展示,`canControl = false`。
-  ③ **过滤**:`activationPolicy == .prohibited` 的守护进程(audiomxd/CoreSpeech/assistantd 等在列表里但不算 app)、自身 bundleID 全部剔除;已知音乐类 bundle 排在前面,避免浏览器视频抢位。
-  ④ **僵尸会话判定**:media 的 app 不在出声列表而**另有 app 在出声**时,丢弃 media 改用出声方——否则 Chrome 空闲会话会让卡片一直显示 Chrome 的旧内容。
-- **代价:** 降级路径拿不到曲名/歌手/进度,暂停时 CoreAudio 输出归零,卡片要等 `staleLimit`(3 次轮询 ≈6s)才清空,无法显示「已暂停」。
+- **Pitfall:** 灵动岛「正在播放」卡片对 QQ音乐、语音备忘录永远显示「没有正在播放的音乐」,而对 Chrome 却常年显示一个早已不存在的会话。
+- **Cause:** macOS 的 Now Playing 是**单一共享槽位**,只有 app 主动向 `MPNowPlayingInfoCenter` 上报才有数据。实测 macOS 27.2.1:QQ音乐(`com.tencent.QQMusicMac`)和语音备忘录播放中,`MRMediaRemoteGetNowPlayingClients` 返回**空数组**、`MRMediaRemoteGetNowPlayingApplicationPID` 返回 0、`localNowPlayingItem` 为 nil;与此同时 `localNowPlayingPlayerPath` 仍指向一个 Chrome 的 **paused 僵尸会话**(空闲后不释放,`localPlaybackState` 恒为 2)。即:读不到不是 API 被封,而是这两个 app 压根不上报;僵尸会话还会把「谁是当前播放器」的判断带偏。
+- **Prevention:** 双源合并,`NowPlayingMonitor.read()`:① **会话优先**(经子进程读保证新鲜,见 DEV-082):拿到 item 且其 bundleID 出现在出声列表里(或出声列表为空)→ 用完整信息(标题/歌手/进度,`canControl = true`);② **CoreAudio 兜底**:`kAudioHardwarePropertyProcessObjectList` + `kAudioProcessPropertyIsRunningOutput == 1` 枚举正在出声的进程(macOS 14+ 公开 API,实测能准确抓到 QQ音乐与语音备忘录),用 `NSRunningApplication` 取 bundleID/localizedName 做降级展示,`canControl = false`;③ **过滤**:`activationPolicy == .prohibited` 的守护进程(audiomxd/CoreSpeech/assistantd 等)与自身 bundleID 全部剔除;④ **僵尸会话判定**:media 的 app 不在出声列表而**另有 app 在出声**时,丢弃 media 改用出声方。
+- **代价:** 降级路径拿不到曲名/歌手/进度,暂停时 CoreAudio 输出归零,卡片要等 `staleLimit`(3 次轮询 ≈6s)才清空。
 - **验证:** `ZEROFLOW_NOTCH_DEBUG=1 ZEROFLOW_NOWPLAYING_DEBUG=1` 启动(后者让轮询脱离面板模块独立运行),播放 QQ音乐应看到 `NowPlaying: audio-only app=com.tencent.QQMusicMac ...`;播放 Music.app 应看到 `NowPlaying: media app=com.apple.Music sounding=true`。
 
 ## DEV-070: MRMediaRemoteSendCommand 的 C 签名是 2 个参数,写错会在 macOS 27 上崩溃
@@ -394,39 +330,17 @@
 - **Prevention:** 按真实签名声明 `@convention(c) (UInt32, CFDictionary?) -> Void`,调用传 `fn(UInt32(command.rawValue), nil)`(实测不再崩溃)。另外**不要用 `controlsAvailable` 决定按钮是否可点**——符号存在不代表目标 app 收得到命令:只有上报 Now Playing 的 app 才是 command handler,CoreAudio 兜底出来的 QQ音乐/语音备忘录必须靠 `NowPlayingInfo.control` 置灰。
 
 ## DEV-071: 不上报 Now Playing 的 app 只能用系统媒体键控制,而且必须是 now playing owner
-
-- **Pitfall:** QQ音乐不上报 Now Playing,`MRMediaRemoteSendCommand` 对它无效。逐条试下来:媒体键 `NX_KEYTYPE_PLAY` 第一次也无效,但换了个时机再试却成功了——说明不是通道不通,是**命令被别的 app 吃掉了**。
-- **Cause:** macOS 的媒体键不走 CGEventTap,而是走 MediaRemote 的 command 分发,只发给**当前 now playing owner**。实测当时 `localNowPlayingPlayerPath` 指向一个 Chrome 的空闲会话(Chrome 早就不播了但不释放),所有媒体键都被 Chrome 收走;后来通过一次激活把 owner 切到 QQ音乐后,三个键立刻全部生效(PLAY 暂停→播放、NEXT 切歌、PREVIOUS 切回,曲名用 AX 读出来逐次核对过)。另外这些 app 的播放控制栏在 AX 里是自绘 `AXUnknown`(`AXPress` 返回 `actionUnsupported -25206`),菜单栏「播放控制」菜单虽然有 `AXPress`,但**后台 app 的菜单栏项不响应**(`activate` 之后才行),所以坐标点击是唯一能"点"到它的方式——代价是必须抢前台,体验不可接受。
-- **Prevention:** 控制通道做成三态 `ControlChannel`:
-  ① `.mediaRemote` —— 上报了 Now Playing,发 `MRMediaRemoteSendCommand`;
-  ② `.mediaKey` —— 不上报,但 `localNowPlayingPlayerPath` 的 bundleID 与目标 app 一致,发 `NX_KEYTYPE_PLAY/NEXT/PREVIOUS`(16/17/18,`NSEvent.otherEvent(.systemDefined, subtype: 8, data1: key<<16 | 0xa<<8)`,down/up 各发一次);
-  ③ `.none` —— 既不上报也不是 owner,**必须置灰**:此时发媒体键会打到别的 app 身上,是最坏的结果。
-  曲名同理别依赖窗口标题(窗口一关就没),读 AX 播放控制栏的 `AXDescription`:`歌曲名：虚拟 - 歌手名：陈粒`,按 ` - 歌手名：` 切分即可;`AXUIElementSetMessagingTimeout(app, 1.0)` 防止 app 无响应时把轮询队列卡 6s。
-- **未解:** 媒体键是 toggle 语义且全局,Zeroflow 无法指定目标;owner 一旦被别人抢走,按钮就会置灰。语音备忘录等原生 app 的 AX 结构尚未验证(可能有真正的 `AXPress` 按钮,能走更稳的通道)。
-
-## DEV-072: 暂停即「消失」——CoreAudio 出声探测对暂停态是瞎的
-
-- **Pitfall:** 从卡片上点暂停,卡片立刻变成「没有正在播放的音乐」——三个按钮跟着一起没了,用户再也点不回去,只能去 app 里手动恢复。
-- **Cause:** `kAudioProcessPropertyIsRunningOutput` 在暂停的瞬间就变成 0,`AudioActivityMonitor.activeApps()` 返回空;而 QQ音乐/语音备忘录这类不上报 Now Playing 的 app 在 `MRNowPlayingRequest.localNowPlayingItem` 里本来就是 nil。于是 `read()` 两个源同时为空 → 返回 nil → 轮询的 `staleLimit`(3 次 ≈6s)把 `nowPlaying` 清空。注意**暂停时 `localNowPlayingPlayerPath` 仍然指向该 app**(实测 `owner=com.tencent.QQMusicMac`),这正是键盘上的播放键能把暂停的 app 唤醒的原因,也是唯一还活着的线索。
-- **Prevention:** `NowPlayingMonitor` 里维护 `lastAudioApp`(pid/bundleID/name),两条兜底:
-  ① 出声列表空了但记忆里的 app 还在跑、且 owner 仍是它 → 输出 `isPlaying = false` 的 `NowPlayingInfo`,control 照旧按 owner 判定(实测暂停后仍是 `.mediaKey`,按钮可点);
-  ② 进程刚启动 / 面板没开过、没有记忆时,直接按 `localNowPlayingPlayerPath` 的 bundleID 找运行中的 app 补出「已暂停」——效果与系统控制中心一致。
-  反向约束:owner 已换成别的 app 时**不要**硬留(说明别处接管了播放),清掉记忆返回 nil。
-- **验证:** 播放 QQ音乐 → 点卡片中间按钮暂停 → 卡片应显示「● 已暂停」+ 曲名仍在 + 频谱压成基线 + 按钮仍可点;再点一次应立刻恢复(`NowPlaying: sent togglePlay via mediaKey` 后紧跟 `audio-only ... owner=true`)。日志里暂停态会打 `NowPlaying: paused app=... control=mediaKey` 或 `paused(owner) app=...`。
+- **Pitfall:** QQ音乐不上报 Now Playing,`MRMediaRemoteSendCommand` 对它无效。逐条试下来:媒体键 `NX_KEYTYPE_PLAY` 第一次也无效,换个时机再试却成功——说明不是通道不通,是**命令被别的 app 吃掉了**。
+- **Cause:** macOS 的媒体键不走 CGEventTap,而是走 MediaRemote 的 command 分发,只发给**当前 now playing owner**。实测当时 owner 指向一个 Chrome 的空闲会话(早就不播了但不释放),所有媒体键都被 Chrome 收走;通过一次激活把 owner 切到 QQ音乐后三个键立刻全部生效。另外这些 app 的播放控制栏在 AX 里是自绘 `AXUnknown`(`AXPress` 返回 `actionUnsupported -25206`),菜单栏「播放控制」项在后台 app 上不响应(`activate` 之后才行)——坐标点击是唯一能"点"到它的方式,代价是必须抢前台,不可接受。
+- **Prevention:** 控制通道做成三态 `ControlChannel`:① `.mediaRemote`(上报了 Now Playing,发 `MRMediaRemoteSendCommand`);② `.mediaKey`(不上报但 owner 是目标 app,发 `NX_KEYTYPE_PLAY/NEXT/PREVIOUS` = 16/17/18,`NSEvent.otherEvent(.systemDefined, subtype: 8, data1: key<<16 | 0xa<<8)`,down/up 各发一次);③ `.none`(既不上报也不是 owner,**必须置灰**:此时发媒体键会打到别的 app 身上)。曲名别依赖窗口标题(窗口一关就没),读 AX 播放控制栏的 `AXDescription`:`歌曲名：虚拟 - 歌手名：陈粒`,按 ` - 歌手名：` 切分;`AXUIElementSetMessagingTimeout(app, 1.0)` 防止 app 无响应时把轮询队列卡 6s。
+- **未解:** 媒体键是 toggle 语义且全局,无法指定目标(见 DEV-081);owner 被别人抢走,按钮就会置灰。
 
 ## DEV-073: 卡片里的「真实频谱」只能走 ScreenCaptureKit,而且必须自适应归一化
-
-- **Pitfall:** 想给「正在播放」卡片加律动效果,三种看起来都能拿到音频的路,只有一条真的出声:CoreAudio process tap 建得成功、IOProc 也在跑,但读出来全是静音;ScreenCaptureKit 从 CLI 直接跑会报 `-3801 用户拒绝`;而算出来的 FFT 幅值又是绝对量纲,直接线性映射会全满格或全灭。
-- **Cause:** ① **process tap**(`CATapDescription(stereoMixdownOfProcesses:)` + `AudioHardwareCreateProcessTap` + 聚合设备)需要单独的音频捕获授权,**不弹窗、静默失败**:`status=0`、`tapID` 有值、IOProc 触发上百次,但 `maxAbs = 0.0`。② **ScreenCaptureKit 的音频轨**复用「屏幕录制」授权,容器 app 已有该授权,所以只有经 LaunchServices 启动(`open -a`)的 app 能跑通,shell 里 exec 二进制会因 TCC 归属不同被拒。③ FFT 幅值随音量/设备差几十 dB,固定阈值必然失真。
-- **Prevention:** `AudioSpectrumMonitor` 的做法:
-  ① 数据源:`SCContentFilter(display:excludingWindows:)` + `config.capturesAudio = true` + `excludesCurrentProcessAudio = true`(防自激),视频轨压到 16×16@1fps(SCK 不允许只开音频)。
-  ② 取样本用 `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer` 拿第一声道,再按 `mNumberChannels` 跳采——**不要**假设 planar 或 interleaved,直接 `CMBlockBufferGetDataPointer` 在非连续块上会失败。
-  ③ FFT:1024 点 + Hann 窗 + `vDSP_fft_zrip` + `vDSP_zvabs`,按 `pow(half, b/16)` 对数分桶取均值。
-  ④ 归一化:**滚动峰值当参考顶**(立刻跟随更高峰、每帧最多回落 0.4dB),显示范围 `参考顶 - 42dB`,再叠 **9dB 高频补偿**(音乐能量集中在低频,不补偿右半边永远平着);数字静音(`topDb <= -100`)直接衰减到 0,否则参考顶会一路掉、把底噪抬成满格。
-  ⑤ 包络:上升直接跟随、下落 `0.75/0.25` 混合;发布限 30fps(`CFAbsoluteTimeGetCurrent` 卡时间戳),FFT 在音频回调队列算完再回主线程赋值。
-  ⑥ SwiftUI 侧 30fps 重绘**必须挂在卡片宿主**(`MusicCardHost` 同时观察 `NowPlayingMonitor` 和 `AudioSpectrumMonitor`),挂到顶层会把日历月网格一起重算(同 DEV-050)。
-- **代价:** 频谱只在音乐模块显示期间跑(`setActive` 与模块联动),面板收起即停流;首次起流有几百毫秒延迟,刚弹出时是平条。
-- **验证:** `defaults write com.zeroflow.app notchAutoShow -bool true` + `notchModule=music` + `notchSnapshot=/tmp/x.png` 后 `open -a`,播放音乐抓图应看到 16 段高低错落的橙色条;暂停后应压成一条基线(不透明度 0.3)。日志出现 `Spectrum: 已启动` 即起流成功,失败会打 `Spectrum: 启动失败 ...`(多半是屏幕录制授权)。
+- **Pitfall:** 想给「正在播放」卡片加律动效果，三种看起来都能拿到音频的路只有一条真的出声：CoreAudio process tap 建得成功、IOProc 也在跑，但读出来全是静音；ScreenCaptureKit 从 CLI 直接跑会报 `-3801 用户拒绝`；而 FFT 幅值又是绝对量纲，直接线性映射会全满格或全灭。
+- **Cause:** ① **process tap**（`CATapDescription(stereoMixdownOfProcesses:)` + `AudioHardwareCreateProcessTap` + 聚合设备）需要单独的音频捕获授权，**不弹窗、静默失败**：`status=0`、`tapID` 有值、IOProc 触发上百次，但 `maxAbs = 0.0`。② **SCK 音频轨**复用「屏幕录制」授权，容器 app 已有该授权，所以只有经 LaunchServices 启动（`open -a`）的 app 能跑通，shell 里 exec 二进制会因 TCC 归属不同被拒。③ FFT 幅值随音量/设备差几十 dB，固定阈值必然失真。
+- **Prevention:** `AudioSpectrumMonitor` 的做法：① 数据源 `SCContentFilter(display:excludingWindows:)` + `capturesAudio = true` + `excludesCurrentProcessAudio = true`（防自激），视频轨压到 16×16@1fps（SCK 不允许只开音频）；② 取样本用 `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer` 拿第一声道，再按 `mNumberChannels` 跳采——**不要**假设 planar 或 interleaved，`CMBlockBufferGetDataPointer` 在非连续块上会失败；③ FFT 1024 点 + Hann 窗 + `vDSP_fft_zrip` + `vDSP_zvabs`，按 `pow(half, b/16)` 对数分桶取均值；④ 归一化：**滚动峰值当参考顶**（立刻跟随更高峰、每帧最多回落 0.4dB），显示范围 `参考顶 - 42dB`，再叠 **9dB 高频补偿**（音乐能量集中在低频，不补偿右半边永远平着）；数字静音（`topDb <= -100`）直接衰减到 0，否则参考顶会一路掉、把底噪抬成满格；⑤ 包络上升直接跟随、下落 `0.75/0.25` 混合，发布限 30fps，FFT 在音频回调队列算完再回主线程赋值；⑥ SwiftUI 侧 30fps 重绘**必须挂在卡片宿主**（`MusicCardHost`），挂到顶层会把日历月网格一起重算（同 DEV-050）。
+- **代价:** 频谱只在音乐模块显示期间跑（`setActive` 与模块联动），面板收起即停流；首次起流有几百毫秒延迟，刚弹出时是平条。
+- **验证:** `defaults write com.zeroflow.app notchAutoShow -bool true` + `notchModule=music` + `notchSnapshot=/tmp/x.png` 后 `open -a`，播放音乐抓图应看到 16 段高低错落的橙色条；暂停后压成基线（不透明度 0.3）。日志出现 `Spectrum: 已启动` 即起流成功，失败打 `Spectrum: 启动失败 ...`（多半是屏幕录制授权）。
 
 ## DEV-074: 触控板「轻点即点击」下 `ButtonStyle.isPressed` 一闪而过,按下动画等于没有
 
@@ -436,31 +350,19 @@
 - **验证:** 轻点(不按下)中间按钮,应看到缩小 + 淡底再弹回;把 `minPressDuration` 调到 0 可复现「点了没反应」。
 
 ## DEV-075: 出声探测 ≠ 在播放,而且 helper 进程的 bundleID 与媒体会话对不上
-
 - **Pitfall:** ① 从卡片暂停 QQ音乐后,中间按钮的图标一直是「暂停」(说明它以为还在播),再点也没法回到播放态;② 暂停 QQ音乐后去播浏览器视频,卡片仍然显示 QQ音乐的图标/曲名,但三个按钮实际控的是浏览器。
-- **Cause:** ① `kAudioProcessPropertyIsRunningOutput` 在暂停后**不一定归零**(app 仍占着输出流),`read()` 的兜底分支又写死 `isPlaying = true`,于是永远判成播放中,永远走不到「已暂停」兜底(DEV-072 那条只在流真的关掉时生效)。② 音频输出常跑在 helper 进程上(Chrome 的音频服务是 `com.google.Chrome.helper`),媒体会话却记在宿主 bundle(`com.google.Chrome`):`media.appBundleID` 与出声列表精确比对必然失败 → 正在播视频的 Chrome 被判成「僵尸会话」丢掉;退回出声列表后又按 `mediaRank` 把已知音乐 app 排第一,占着流的 QQ音乐继续压过 Chrome。而媒体键按「实际在播的会话」路由,于是出现「卡片显示 QQ音乐、按钮控的是浏览器」。
+- **Cause:** ① `kAudioProcessPropertyIsRunningOutput` 在暂停后**不一定归零**(app 仍占着输出流),旧代码兜底分支又写死 `isPlaying = true`,于是永远判成播放中。② 音频输出常跑在 helper 进程上(Chrome 的音频服务是 `com.google.Chrome.helper`),媒体会话却记在宿主 bundle(`com.google.Chrome`):`media.appBundleID` 与出声列表精确比对必然失败 → 正在播视频的 Chrome 被判成「僵尸会话」丢掉。
 - **Prevention:**
-  ① **播放态直接由「有没有声音」驱动,不要轮询去猜**:`AudioSpectrumMonitor` 暴露 `@Published isAudible`(系统混音超过 `silenceDb + 10` 算有声,带 0.35s 保持防淡出闪断),`NowPlayingMonitor` 在 init 里用 Combine 订阅它——电平一落平就地把 `nowPlaying.isPlaying` 翻成 false,一有声就翻回 true,**不经过 2s 轮询**。`read()` 只用 `audible` 给兜底来源赋初值,`audible == nil`(没在捕获 = 不知道)时才退回 `true`,否则没屏幕录制权限会一律显示「已暂停」。
-  ② **别做乐观翻转**:早先版本在 `send(.togglePlay)` 后本地翻状态再挂 4s 窗口,结果和轮询互相打架(用户报「经常出错」)。电平信号本身就是真相且 0.35s 内到位,直接以它为准,少一层猜测就少一类 bug。**并且轮询结果落地时必须按当前电平再校一次**(`publish()` 里做),否则后台队列里读到的旧值会把 `applyAudible` 刚翻好的状态盖回去——症状是「点了播放图标闪一下又变回暂停」。
-  ③ **静音时要有人推进状态**:SCK 在完全静音时可能不再投递音频 buffer,`analyze()` 不跑,`isAudible` 就永远停在 true(实测停了 4.5s 才被别的声音事件纠正)。捕获期间挂一个 10Hz 主线程计时器重算 `lastAudibleFrame` 的过期,状态才能自己落回暂停。
-  ④ **出声进程不一定能查到 app**:Chrome 的音频 helper 没在 LaunchServices 注册,`NSRunningApplication(processIdentifier:)` 直接返回 **nil**(实测 lsBundle=nil、pathBundle=com.google.Chrome.helper),旧代码 `guard let raw = ... else { continue }` 把整条记录丢掉,症状是「明明有声音,actives 是空的」→ 只能退回 owner 兜底、判成暂停。改成 `proc_pidpath` 从可执行路径取最内层 `.app` 的 bundleID,再交给 `hostApp` 归并到宿主。
-  ⑤ **由静变响要立刻补查**:`applyAudible(true)` 顺带 `tick()`(0.5s 限流),否则「切到浏览器视频」要等下一个 2s 轮询才换卡片,用户体感是「切换有点慢」。
-  ⑥ **bundle 比对改成家族匹配**:`sameApp(a,b)` = 相等或互为 `.` 前缀(`com.google.Chrome.helper` ↔ `com.google.Chrome`);`AudioActivityMonitor` 把 helper 归并到宿主 app(取最长前缀的 `.regular` 进程),用宿主 pid 读 AX/窗口标题,并按 bundleID 去重。守护进程过滤也从「要求非 `.prohibited`」改成「归并后仍 `.prohibited` 才丢」——helper 的 `activationPolicy` 本身可能就是 `.prohibited`,旧写法会把它们一起过滤掉。
-  ⑦ **WebKit 宿主按名字认**:QQ音乐是 WebKit 播放器,音频可能跑在 `com.apple.WebKit.GPU` 上,bundle 前缀归并不出来,只能靠进程名「<宿主> Graphics and Media」前缀匹配宿主 app。
-  ⑧ **owner 优先排序**:`activeApps(owner:)` 把 `localNowPlayingPlayerPath` 指向的 app 排最前,`mediaRank` 只当同级 tiebreaker。
-  ⑨ **控制按钮别只认 owner**:owner 经常被别的 app 的残留会话占着(浏览器空闲不释放),这时只要目标是**唯一在出声的 app**,媒体键仍会按「有声的会话」路由过去,`control` 用 `isOwner || actives.count == 1` 判 `.mediaKey`,否则 QQ音乐在播也会被置灰成摆设(用户实测反馈)。
-  ⑩ **「出声列表空」不等于暂停**:空列表时用 `audible` 区分——有声就按 owner 展示成在播,没声才判暂停(早先版本无条件判暂停,有声时会被轮询反复打回「已暂停」)。
+  ① **播放态直接由「有没有声音」驱动,不要轮询去猜**:`AudioSpectrumMonitor` 暴露 `@Published isAudible`(系统混音超过 `silenceDb + 10` 算有声,带 0.35s 保持防淡出闪断),`NowPlayingMonitor` 用 Combine 订阅——电平一落平就地把 `isPlaying` 翻成 false,一有声就翻回 true,**不经过 2s 轮询**。`read()` 只用 `audible` 给兜底来源赋初值,`audible == nil`(没在捕获 = 不知道)时才退回 `true`,否则没屏幕录制权限会一律显示「已暂停」。
+  ② **别做乐观翻转**:早先版本在 `send(.togglePlay)` 后本地翻状态再挂 4s 窗口,结果和轮询互相打架。电平信号 0.35s 内到位,直接以它为准。**并且轮询结果落地时必须按当前电平再校一次**(`publish()` 里做),否则后台队列里读到的旧值会把 `applyAudible` 刚翻好的状态盖回去(症状:「点了播放图标闪一下又变回暂停」)。
+  ③ **静音时要有人推进状态**:SCK 在完全静音时可能不再投递音频 buffer,`analyze()` 不跑,`isAudible` 就永远停在 true。捕获期间挂一个 10Hz 主线程计时器重算 `lastAudibleFrame` 的过期。
+  ④ **出声进程不一定能查到 app**:Chrome 的音频 helper 没在 LaunchServices 注册,`NSRunningApplication(processIdentifier:)` 直接返回 **nil**(实测 lsBundle=nil、pathBundle=com.google.Chrome.helper),旧代码 `guard let raw = ... else { continue }` 把整条记录丢掉,症状是「明明有声音,actives 是空的」。改成 `proc_pidpath` 从可执行路径取最内层 `.app` 的 bundleID,再交给 `hostApp` 归并到宿主。
+  ⑤ **由静变响要立刻补查**:`applyAudible(true)` 顺带 `tick()`(0.5s 限流),否则「切到浏览器视频」要等下一个 2s 轮询才换卡片。
+  ⑥ **bundle 比对改成家族匹配**:`sameApp(a,b)` = 相等或互为 `.` 前缀(`com.google.Chrome.helper` ↔ `com.google.Chrome`);`AudioActivityMonitor` 把 helper 归并到宿主 app(取最长前缀的 `.regular` 进程),用宿主 pid 读 AX/窗口标题,并按 bundleID 去重。守护进程过滤也从「要求非 `.prohibited`」改成「归并后仍 `.prohibited` 才丢」——helper 的 `activationPolicy` 本身可能就是 `.prohibited`。
+  ⑦ **WebKit 宿主按名字认**:QQ音乐是 WebKit 播放器,音频可能跑在 `com.apple.WebKit.GPU` 上,bundle 前缀归并不出来,只能靠进程名「<宿主> Graphics and Media」前缀匹配宿主 app(名字长的优先)。
+  ⑧ **「出声列表空」不等于暂停**:空列表时用 `audible` 区分——有声就按 owner 展示成在播,没声才判暂停。
 - **代价:** 系统音量调到 0 / 输出静音时会被判成「已暂停」;媒体会话为 nil、owner 是陈旧会话、且出声探测也漏掉进程时,仍分不清谁在响。
-- **验证:** `defaults write com.zeroflow.app notchDebug -bool true` 后复现:日志里 `actives=[...]` 应随播放/暂停出现和消失(Chrome 播放时应是 `com.google.Chrome`);点暂停 → `audible=false 当前=.../true` 紧跟一次翻转,图标 0.5s 内变播放;播浏览器视频 → 立刻(不等 2s)出现 `media app=com.google.Chrome sounding=true` 或 `audio-only app=com.google.Chrome`。命令行可复现出声探测:`afplay /System/Library/Sounds/Submarine.aiff` 期间跑 CoreAudio 枚举应看到该 pid 的 `runningOutput=1`。
-- **代价:** 系统音量调到 0 / 输出静音时会被判成「已暂停」;媒体会话为 nil 且 owner 是陈旧会话时,仍分不清两个同时「占着流」的 app 谁在响。
-- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`(或 `ZEROFLOW_NOTCH_DEBUG=1`)后复现:播放 QQ音乐 → 卡片 `audio-only ... silent=false`;点暂停 → 图标立刻变播放,2s 后日志 `audio-only ... silent=true` 且状态保持「已暂停」;再播浏览器视频 → 日志应为 `media app=com.google.Chrome sounding=true`(或 `audio-only app=com.google.Chrome`),卡片换成浏览器图标与页面标题。
-
-## DEV-076: 两个 app 都暂停时,卡片会跟着「谁抢到媒体会话」乱跳
-
-- **Pitfall:** QQ音乐和浏览器都暂停时,把浏览器切到前台(或它加载了视频但没播),卡片就从 QQ音乐跳到浏览器;反向(切回 QQ音乐窗口)却不跳。用户要的是:只有真的开始播才换卡片。
-- **Cause:** `read()` 里有一条 `actives.isEmpty → return media`——没人在出声时直接用系统 Now Playing 的会话。但媒体会话是**单槽**,浏览器一加载视频就把槽抢过去(哪怕没播),于是卡片跟着它跑。而 QQ音乐不上报,永远抢不回这个槽。
-- **Prevention:** 在 `read()` 最前面加一条「锁」:没声音(`audible != true`)且出声列表为空时,只要 `lastAudioApp` 还在跑就直接返回它,不看 `media`、不看 owner。真的出声时(`audible == true`)这条自动失效,卡片才换人——正好对上「点了播放才切」。同时暂停态的 `control` 一律给 `.mediaKey`,否则被锁住的那张卡片按钮是灰的,用户点不回去。
-- **代价:** 静音播放(系统音量 0、视频本身静音)时卡片不会切过去——没有声音就没有依据。
+- **验证:** `defaults write com.zeroflow.app notchDebug -bool true` 后复现:日志里 `actives=[...]` 应随播放/暂停出现和消失(Chrome 播放时应是 `com.google.Chrome`);点暂停 → `audible=false` 紧跟一次翻转,图标 0.5s 内变播放;播浏览器视频 → 立刻(不等 2s)出现 `media app=com.google.Chrome sounding=true` 或 `audio-only app=com.google.Chrome`。命令行可复现出声探测:`afplay /System/Library/Sounds/Submarine.aiff` 期间跑 CoreAudio 枚举应看到该 pid 的 `runningOutput=1`。
 
 ## DEV-077: 暂停态的图标要跟手,数字静音必须走快速通道
 
@@ -469,44 +371,18 @@
 - **Prevention:** 加第二条判据:连续 3 帧(≈100ms)出现**数字静音**(`topDb <= silenceDb`,只有真正停掉输出才有)就直接判 `audible = false`,不走保持期;保持期只兜「有底噪但很轻」的模糊情况。两条判据合成 `audibleNow`,回调路径和 10Hz 兜底计时器共用。
 - **验证:** `afplay /System/Library/Sounds/Submarine.aiff` 结束时日志里的 `audible=false` 应与结束时刻相差 <100ms(实测 0~100ms),图标在按下动画还没结束时就翻过去。
 
-## DEV-078: 多个 app 同时出声时,卡片要显示「最后被操作的那个 app」,而「被操作」有五种形态
-
-- **Pitfall:** 先在浏览器播视频、再打开 QQ音乐播歌,两个音频同时在放。媒体键实际控的是 QQ音乐(最后操作的那个),但卡片显示的却是浏览器的信息——「能控的和显示的」对不上。改成「最近**开始播**的那个」之后,方向反过来坏:浏览器→QQ 修好了,QQ→浏览器又变慢/不切。
-- **Cause:** ① 展示顺序按 `mediaRank` + `localNowPlayingPlayerPath` 的 owner 排:Chrome 占着会话槽,永远压过 QQ音乐;`media` 分支又会直接返回上报方,所以 QQ音乐一开局就输。② 元数据轮询 2s 一次,新出现的出声方要等下一个周期才被看见。③ 只用「进了出声列表」判操作是不够的:app 暂停后**未必**离开出声列表(AVAudioPlayer 的 `pause()` 实测 `IsRunningOutput` 仍是 1),而浏览器换一条视频时出声列表、owner、playbackRate **三者全都不变**——这几种「刚被操作」在出声列表上完全看不见。
-- **Prevention:**
-  ① **展示 = 出声列表里最后被操作的那个**(`pickActive` + `operatedAt` 时间戳取最大)。「被操作」由五个信号合成,缺一个就会有一个方向切不过去:`trackOperations()`
-  - 新进出声列表(开始播;暂停后进程消失的 app 走这条,QQ音乐就是);
-  - 系统会话 owner 换人(浏览器抢槽/开始播都走这条,不用等出声列表变);
-  - 上报会话 `playbackRate` 由停转播(同一个 app 自己暂停再播,owner 不变);
-  - 混音由静变响(`applyAudible` 里 `queue.async { sawSilence = true }`,队列侧消费,单候选直接判、多候选退而信 owner);
-  - 上报内容换了(曲名变 / 进度跳回 0)——槽和输出流都没动静时只有这里看得出来。
-  `media` 只在「它的 app 就是这个人」时才用(信息更全),否则用 CoreAudio 兜底。
-  ② **出声列表单独跑高频哨兵**:`activeApps()` 只是几个 CoreAudio 属性读(微秒级),而元数据(AX + CGWindowList)很贵。拆成 0.3s 的 `checkActivity()`,比的是 `bundleID 集合 + SessionSnapshot(owner/playing/title)`,任一变化就 `tick()`,切 app 从「最多 2s」变成「最多 0.3s」。`SessionSnapshot` 的 owner 要**独立于 item 取**:会话可能没有曲名(浏览器加载了页面但没播),那时 owner 照样有值,不能因为读不到 item 就把 owner 一起丢。
-  ③ **按钮不再按 owner 置灰**:既然展示的就是最后操作的那个 app,媒体键也路由给它,`control` 直接给 `.mediaKey`;置灰只会让用户点不动自己能控的东西。
-- **代价:** 「同时只控一个」做不到——`MRMediaRemoteSendCommandToApp` 这类按 app 发命令的接口需要 `com.apple.mediaremote.send-commands` 私有授权,没有授权时命令会被重定向到当前播放器(实测符号存在但无效),所以没法先把别的 app 暂停再操作目标。另一个代价见 DEV-079(多个 app 同时占着输出流时,声音归属无公开 API)。
-- **验证:** 用两个可控假播放器(`/tmp/zfmock`,AVAudioPlayer 循环播 440Hz,**不**上报 Now Playing,行为等同 QQ音乐)跑固定序列,`ZEROFLOW_NOWPLAYING_DEBUG=1` 启动看日志:① 只播 A → `audio-only app=com.example.zfmocka`;② 再播 B → 1.5s 内变 `com.example.zfmockb`(这就是用户要的「显示最后操作的那个」);③ 暂停 B 再播 B → 仍为 B。浏览器侧同理(先播浏览器视频、再播 QQ音乐,日志应出现 `audio-only app=com.tencent.QQMusicMac ... n=2`)。
-
 ## DEV-079: 多个 app 同时占着输出流时,「谁在出声」没有公开 API 可归属
-
-- **Pitfall:** 两个 app 都播过、都还占着输出流(暂停但 `IsRunningOutput` 仍为 1),混音从静变响时,代码知道「有人开始播了」,但**不知道是哪个**。这时只能退而信 now playing owner(不上报的 app 又没有 owner),猜错就会出现「卡片显示 A,实际响的是 B」。
+- **Pitfall:** 两个 app 都播过、都还占着输出流(暂停但 `IsRunningOutput` 仍为 1),混音从静变响时,代码知道「有人开始播了」,但**不知道是哪个**。
 - **Cause:** `kAudioProcessPropertyIsRunningOutput` 是布尔值,CoreAudio 的 process object 只暴露 PID / bundleID / IsRunning / IsRunningInput / IsRunningOutput,**没有**每进程电平或时间戳;系统混音(`AudioSpectrumMonitor`)拿到的是所有 app 的叠加,天然无法归属。
-- **Prevention:** 目前只在「能归属」的情况下记账(见 DEV-078 的五个信号),归属不了就不改展示,避免瞎猜导致卡片乱跳。真要彻底解决得上 **process tap**(`AudioHardwareCreateProcessTap`,macOS 14.2+)给每个候选进程单独取电平,代价是要为每个进程建 aggregate device + IOProc,属于另一个量级的改动。
-- **验证:** 用 `/tmp/zfmock` 的两个假播放器:`play a` → `play b` → `pause a` → `pause b`(此时两个都占着流、混音静)→ `play a`,卡片会停在最后操作的 B 上而不是 A。这是已知限制,不是回归。
-
-## DEV-080: 僵尸 now playing 会话不能当成「刚被操作」,否则浏览器永远压着真正在响的 app
-
-- **Pitfall:** 给 `operatedAt` 加「会话 owner 换人 = 被操作」这个信号之后,浏览器彻底主导:不管最后操作的是谁,卡片都显示浏览器,点播放也确实播浏览器。
-- **Cause:** `localNowPlayingPlayerPath` 只表示「谁占着会话槽」,**不代表它在播**。实测 Chrome 空闲后仍长期占着槽,而且槽里连曲名都没有(`owner=com.google.Chrome title=-`)。按「owner 变了就算被操作」记账,等于每次混音从静变响、每次启动首读,都把一次操作白送给这个僵尸;再加上多候选时「退而信 owner」的兜底,它还能在每次静→响时被反复加分。
-- **Prevention:** 三条一起改。① owner 换人必须**同时**满足「会话真的在播(`playbackRate != 0`)+ 会话的 bundleID 与 owner 一致 + owner 在出声列表里」才记账,空槽/僵尸一律不认;② 混音由静变响时**只有单一候选**才记账,多候选宁可不动(见 DEV-079),不要退而信 owner;③ 诊断日志打出每个候选「距今多久被记成刚被操作」(`pick=... [bid=2.3s ...]`),下次再出现「为什么显示它」直接看这行。
-- **验证:** 浏览器空闲占着槽 + QQ音乐在播时,`NowPlaying: pick=com.tencent.QQMusicMac [com.google.Chrome=从未 ...]`,卡片应显示 QQ音乐。
-- **仍存在的限制(见 DEV-081):** 显示对了,但点按钮**不一定控得到它**。
+- **Prevention:** 归属不了就不猜(DEV-090 把展示对象收敛成 owner,正是绕开这一点)。真要彻底解决得上 **process tap**(`AudioHardwareCreateProcessTap`,macOS 14.2+)给每个候选进程单独取电平,代价是每进程一个 aggregate device + IOProc,属于另一个量级的改动。
+- **验证:** 两个假播放器 `/tmp/zfmock`:`play a` → `play b` → `pause a` → `pause b`(此时两个都占着流、混音静)→ `play a`,卡片停在 owner 上而不是 A。已知限制,不是回归。
 
 ## DEV-081: 媒体键无法定向,卡片显示和按钮实际控制对象可能不是同一个 app
-
 - **Pitfall:** 卡片显示 QQ音乐,点播放却把浏览器里的视频播起来了。
-- **Cause:** 播放控制只有一条通道——系统媒体键(`NX_KEYTYPE_PLAY`),它由 MediaRemote 分发给**当前 now playing owner**,调用方无法指定目标。实测排除的替代路径:① `MRMediaRemoteSendCommandToApp(cmd, nil, bundleID, nil)` 传 bundleID 直接 SIGSEGV(第 3 参不是 CFString,真实签名要 playerPath/私有授权);② `MRMediaRemoteSendCommand` 对不上报 Now Playing 的 app 无效;③ QQ音乐的播放控制栏在 AX 里是自绘 `AXUnknown`(`desc="播放"`、有精确 frame、但 `actions=[]`),按不动;④ 就算按 frame 用 `CGEvent.postToPid` 点,QQ 后台时 AX 树连窗口都不暴露(`AXWindows` 为 0,只有它自己在前台才可见),拿不到坐标。⑤ 给 owner 发 `stop` 也踢不掉槽(实测 owner 不变)。
-- **Prevention:** 目前**不做特殊处理**,只在 `send()` 里打一行诊断:`send togglePlay card=X owner=Y ⚠️不一致`。**别试图用「显示=按钮能控的那个」来兜**:到底谁会被控,取决于系统按「谁在播/谁最后被操作」做的路由,而我们既拿不到可靠的路由结果(见 DEV-082),合成的媒体键在测试环境里也对不上(打一次 key,Chrome 暂停的视频没恢复、会话方的 mock 也没暂停)——按它做显示规则只会把浏览器重新推上卡片。所以显示仍按「最后被操作的出声 app」,控制照发媒体键。
-- **代价:** 只要浏览器(或任何上报 Now Playing 的 app)占着会话槽,媒体键就可能先到它手上;想让 QQ音乐被控,只能等它自己成为路由目标。真正自洽的替代方案只有「显示最后操作的 app + 不可控时置灰」,需要产品上接受按钮点不动。
+- **Cause:** 播放控制只有一条通道——系统媒体键(`NX_KEYTYPE_PLAY`),它由 MediaRemote 分发给**当前 now playing owner**,调用方无法指定目标。已排除的替代路径:① `MRMediaRemoteSendCommandToApp(cmd, nil, bundleID, nil)` 传 bundleID 直接 SIGSEGV(第 3 参不是 CFString,真实签名要 playerPath/私有授权);② `MRMediaRemoteSendCommand` 对不上报 Now Playing 的 app 无效;③ QQ音乐的播放控制栏在 AX 里是自绘 `AXUnknown`(`desc="播放"`、有精确 frame、`actions=[]`),按不动;④ 就算用 `CGEvent.postToPid` 按 frame 点,QQ 后台时 AX 树连窗口都不暴露(`AXWindows` 为 0);⑤ 给 owner 发 `stop` 也踢不掉槽。
+- **Prevention:** 这是 DEV-090 的直接前提——**展示对象必须是 owner**,否则按下去必然控错。`send()` 里打一行诊断:`send togglePlay card=X owner=Y ⚠️不一致`,出现即说明展示逻辑被改坏了。别试图用「显示 = 按钮能控的那个」来兜:到底谁被控取决于系统按「谁在播/谁最后被操作」做的路由,拿不到可靠结果。
+- **代价:** 只要浏览器(或任何上报 Now Playing 的 app)占着会话槽,媒体键就可能先到它手上;想让 QQ音乐被控,只能等它自己成为路由目标。
+
 ## DEV-082: 进程内读 MediaRemote 会**冻结**在首次读取,长跑进程永远看不到 owner 变化
 
 - **Pitfall:** app 启动时浏览器正占着会话槽,之后浏览器关了、QQ音乐开始播,卡片却一直按「owner 是浏览器」来判——显示浏览器、控制也发给了浏览器。重启 app 立刻正常。看起来像「显示逻辑又错了」,其实是读数本身是死的。
@@ -523,42 +399,19 @@
 - **Prevention:** ① `rebuildObservers`/`addObserver` 全部丢到 `axQueue`(串行后台队列),主线程只留 `CFRunLoopAddSource(CFRunLoopGetMain(), ...)`;`registerObserver` 前用 `isAXClientCandidate` 过滤(排除 `com.apple.WebKit*`、`.xpc/` 路径、无 bundleURL、`.prohibited`);注册失败的 pid 记进 `failedPids` 不再重试(pid 退出/复用即清);`AXUIElementSetMessagingTimeout(element, 0.3)` 给单次调用封顶。② `DockClickMinimizer.appFromDockItem` 先判命中点是否落在自家窗口里(`isOwnWindowPoint`,用 `CGWindowListCopyWindowInfo` 而不是 `NSApp.windows`——事件线程碰 AppKit 窗口数组不安全),是就直接放行不解 AX;`appFromHitTest` 同样设 0.3s 超时。
 - **验证:** `ZEROFLOW_OPEN_SETTINGS=1` 启动后 `sample` 主线程应停在 `_DPSNextEvent`(空闲),日志里失败注册只出现一次、每个 ≤0.3s、且看不到 WebKit 子进程的 pid。修复前同场景主线程停在 `rebuildObservers → _AXObserverAddNotification`。
 
-## DEV-084: 卡片显示对象必须「粘住」当前播放器,暂停不能换人
-
-- **Pitfall:** 两个声源同时在放(A 早开、B 后开,卡片显示 B)。点暂停把 B 停掉后,卡片切到还在响的 A;再点暂停,本该停掉 A,实际却是 **B 被重新拉起来**,两个声源一起在播。
-- **Cause:** ① B 暂停后离开 CoreAudio 出声列表,`trackOperations` 里 `operatedAt = operatedAt.filter { live.contains($0.key) }` 把 B 的「刚被操作」记录删掉,`pickActive` 于是退到还在响的 A;② 但媒体键(`NX_KEYTYPE_PLAY`)由 MediaRemote 分发给**最后开播的那个 app**,也就是 B,无法定向(DEV-081)。于是「卡片上是 A、按下去动的是 B」;③ B 被媒体键拉起后重新进出声列表,`operatedAt[B] = now`,卡片又跳回 B——三步串成「两个都在播」。
-- **Prevention:** 把「展示对象」从「出声列表里 operatedAt 最大的那个」改成**粘性状态** `current`(`updateCurrent`):只有「某个 app 的 operatedAt 比 `current.at` 更晚」或「它退出了」才换人,暂停、离开出声列表一律不换。卡片停在暂停态的那个 app 上,按钮点的就是它,系统路由的也是它。`pickActive`/`idleInfo`/`lastAudioApp` 因此整体删除——`audioOnlyInfo` 直接按 `current` 出卡,app 重启(pid 变了)时按 bundleID 重新认 pid。面板关着时不轮询,`operatedAt` 收不到信号——重开时靠 `previousActives` 仍是旧集合这一点认出「关着期间有人开播」(信号 1),**不要**在重开时按「谁在响」重挑(那会让「暂停当前播放器、切个窗口」直接跳卡,见 DEV-087)。
-- **代价:** 当前播放器暂停、别的 app 还在响时,卡片显示的是「已暂停」而不是那个在响的 app(用户要的就是这个:状态只存最新那个播放器)。想暂停另一个 app 只能去它自己的界面。**这条代价在 DEV-089 被收窄**:现在「它确认静了、而别人确认在响」会让位,其余情况(单纯暂停、没人替代)仍然粘住。
-- **验证:** 两个可控假播放器:`play a` → `play b` → 点卡片暂停 → 卡片仍显示 B(已暂停)、A 继续响 → 再点播放 → 只把 B 拉起来,不会出现「两个都在播」。日志里 `NowPlaying: current=...` 只在「新开播」时变。
-
 ## DEV-085: 播放/暂停图标要「点击即翻 + 律动验证」,不能只信 playbackRate
-
 - **Pitfall:** 卡片中间的播放/暂停图标时不时显示反的:点了暂停图标不动、或点了播放又自己变回播放键;律动柱子还在跳,图标却显示「播放」。
-- **Cause:** ① 上报型 app(`control == .mediaRemote`)的 `isPlaying` 只认 2s 一次子进程读到的 `playbackRate`,`applyAudible`/`publish` 里都有 `control != .mediaRemote` 的短路——电平再快也不参与判定,字段缺失时还默认「在播」;② 不上报的 app 的 `isPlaying` 直接等于全局混音 `audible`,别的 app 在响时它明明是暂停也显示「在播」;③ 频谱柱子在 `!isPlaying` 时只把透明度降到 30%,柱子照样跟着全局混音跳,和图标自相矛盾。
-- **Prevention:** ① 播放态收敛到 `deriveIsPlaying` 一处:有声音且当前 app 还在出声列表里 = 在播,没声音 = 暂停;唯一例外是「上报型 app 仍在输出流里且自称在播」——那是系统音量 0/输出静音,不能判暂停(DEV-075 的已知代价);没在捕获或出声列表还没认出来时退回上报值。② `send(.togglePlay)` 先 `beginPendingToggle` 立刻翻图标,开一个 1.6s 的待确认窗口:窗口内 `applyAudible`/`publish` 不许覆盖,一旦真实信号与意图一致就提前收窗,超时还没对上才认命改回真实值;发不出去(符号缺失 / `.none`)时不翻。③ 发送后补查改成 0.2/0.6/1.2s 三次(`inFlight` 挡重叠),不再只查一次 0.5s。④ `spectrumStrip` 在 `!isPlaying` 时把 16 段压成基线,律动与图标永远一致。
-- **代价:** 系统音量 0 时「在播」只能靠上报值维持,不上报的 app 会被判成暂停;暂停后仍占着输出流的 app(浏览器)在 `audible` 为 true 时仍可能被当成在播(DEV-079 无解)。
-- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`,点暂停 → 图标当帧变播放键、日志出现 `待确认 <bid> → 暂停`,随后要么 `current` 侧电平翻转提前收窗,要么 1.6s 后 `待确认超时 → 真实值 false`;律动柱子在暂停瞬间压平。
+- **Cause:** ① 上报型 app 的 `isPlaying` 只认 2s 一次子进程读到的 `playbackRate`,字段缺失时还默认「在播」;② 不上报的 app 的 `isPlaying` 直接等于全局混音 `audible`,别的 app 在响时它明明是暂停也显示「在播」;③ 频谱柱子在 `!isPlaying` 时只把透明度降到 30%,柱子照样跟着全局混音跳,和图标自相矛盾。
+- **Prevention:** ① 播放态收敛到 `deriveIsPlaying` 一处:有声音且当前 app 还在出声列表里 = 在播,没声音 = 暂停;唯一例外是「上报型 app 仍在输出流里且自称在播」(系统音量 0/输出静音,不能判暂停);没在捕获或出声列表还没认出来时退回上报值。② `send(.togglePlay)` 先 `beginPendingToggle` 立刻翻图标,开一个 1.6s 的待确认窗口:窗口内 `applyAudible`/`publish` 不许覆盖,真实信号与意图一致就提前收窗,超时还没对上才认命改回真实值;发不出去(`.none`)时不翻。③ 发送后补查改成 0.2/0.6/1.2s 三次(`inFlight` 挡重叠)。④ `spectrumStrip` 在 `!isPlaying` 时把 16 段压成基线,律动与图标永远一致。
+- **代价:** 系统音量 0 时「在播」只能靠上报值维持;暂停后仍占着输出流的 app(浏览器)在 `audible` 为 true 时仍可能被当成在播(DEV-079 无解)。
+- **验证:** `notchDebug` 打开,点暂停 → 图标当帧变播放键、日志出现 `待确认 <bid> → 暂停`,随后要么电平翻转提前收窗,要么 1.6s 后 `待确认超时 → 真实值 false`;律动柱子在暂停瞬间压平。
 
 ## DEV-086: 「这个 app 停了没有」判不准——只能按 app 单独抓音频
-
-- **Pitfall:** 多个声源同时响时,把最新那个声源暂停,卡片图标和律动都不停(还在跳);律动看起来跟图标矛盾。上一版(DEV-084/085)用「混音有声 + 它在出声列表里 = 在播」推,一样停不下来。
-- **Cause:** 三条判据全都不可靠:① `kAudioProcessPropertyIsRunningOutput` 是布尔值,暂停后**不一定归零**(浏览器/AVAudioPlayer 暂停仍占着输出流,DEV-075);② 系统混音是所有 app 的叠加,别的声源还在响时「有声」永远为真,无法归属到具体 app(DEV-079);③ `playbackRate` 只有上报型 app 有,而且 2s 才更新一次。三者叠起来,「卡片上这个 app 停了没有」在公开 API 里根本判不出来。
-- **Prevention:**
-  ① 新增 `AppAudioProbe`:用 `SCContentFilter(display:including:[app], exceptingWindows:[])` + `capturesAudio` 给**当前播放器**单独开一条捕获流(16×16@1fps、只算峰值不跑 FFT),按「有没有能量」判它在不在出声,0.3s 保持。复用截图已有的屏幕录制权限,不额外弹授权。
-  ② **没收到过音频 buffer 之前绝不说「静音」**:分不清「它本来就静着」和「按 app 捕获对它不生效」,说错会把正在播的卡片判成暂停。只有先听见它出声,之后的静音才可信;否则 `isSounding = nil`,调用方退回旧规则。
-  ③ 探针只在面板可见时生效,收起面板即停掉所有捕获流,不留空转流。~~只给当前播放器建一条~~ —— **已由 DEV-089 改成给所有候选各建一条**,`generation` 仍用来丢弃过期启动结果。
-  ④ 探针拿不到电平时用**锁存**(`audioOnlyLatch`)兜底:只认正向证据(离开出声列表=停、重新进入=播、混音由静变响且单一候选=播、点击意图),不再用「混音有声 + 在列表里」每次重推——那条正是「点了暂停又自己变回在播」的来源。待确认窗口内与意图相反的证据先不覆盖图标,窗口结束才认。
-  ⑤ 上报型 app(`.mediaRemote`)直接信 `playbackRate`,不再被「在不在出声列表里」盖掉。
-- **代价:** 多一条捕获流(≈ 一个 16×16@1fps 音频会话);按 app 捕获对个别 app 可能不生效(靠 `nil` 退回锁存);系统音量 0 时探针听不到声音,卡片会显示暂停(与律动一致,取舍见 DEV-085)。
-- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`,日志里应看到 `AppAudio: 探测 pid=... bundle=...`,暂停时 `NowPlaying: 探针 静音 → <bid>`(0.3s 内),律动同时压平;两个声源同时响时只有被暂停的那个卡片停,另一个不受影响。若看不到 `AppAudio: 探测`,说明该 app 拿不到捕获对象,走锁存兜底。
-
-## DEV-087: 「会话 owner 换人」不是「有人开始播」——切窗口会让卡片乱跳
-
-- **Pitfall:** 浏览器先播、QQ音乐后播(卡片显示 QQ)。暂停 QQ 后卡片正确停在 QQ(已暂停),但只要**把窗口切到浏览器**(不点任何按钮),卡片就跳到浏览器,而按钮实际还在控 QQ——显示和控制又对不上了。
-- **Cause:** 两条「不是操作却记账」的路径。① `trackOperations` 把「now playing 会话 owner 换人」当成一次操作(`operatedAt[bid] = now`):owner 只表示谁占着会话槽,把浏览器点到前台会让它重新注册会话、抢走槽位,于是浏览器拿到一个新时间戳,`updateCurrent` 里 `bestAt > cur.at` 成立就换人。② 上一版为「面板关着时用户可能在别处换着播」加了 `needsFreshPick`:重开面板时按「谁真的在响」重挑一次。但面板是悬停 HUD,频繁开关,而「当前播放器已暂停、另一个还在响」正是最典型的暂停后状态——每次重开都会把卡片抢到那个还在响的 app 上。
-- **Prevention:** ① **删掉 owner 换人这个信号**。浏览器真的开始播时,出声列表(信号 1)或 `playbackRate` 由停转播(信号 2)一定会动,不需要 owner;owner 只在首次挑人(`current == nil`)和排序 tiebreak 里用。② **删掉 `needsFreshPick`**,重开面板不重挑展示对象;关着期间真有人开播,靠 `previousActives` 还是旧集合就能认出(信号 1 会正常记账)。③ 顺带收紧信号 4(会话内容变了):只认「正在播 + 曲名变了」,不再认「进度跳回 0」——会话重新注册时进度也会跳回 0,切个窗口就够触发;暂停中的会话改标题同样不算开始播。④ `checkActivity` 的进/出列表证据在「前一帧为空」(面板刚打开)时不算数,否则整张表都会被当成「刚进入」。
-- **代价:** 浏览器在「占着输出流、不上报、也不进/出列表」的状态下换视频,可能不被认成一次新操作(要等它重新进列表或 rate 翻转)。
-- **验证:** 浏览器播视频 → QQ音乐播歌(卡片=QQ)→ 卡片里暂停 QQ → 反复把浏览器窗口切到前台/切回 QQ → 卡片必须一直停在 QQ(已暂停),日志里不应出现 `current ... → com.google.Chrome（新开播）`。
+- **Pitfall:** 多个声源同时响时,把最新那个声源暂停,卡片图标和律动都不停(还在跳),与图标矛盾。用「混音有声 + 它在出声列表里 = 在播」推,一样停不下来。
+- **Cause:** 三条判据全都不可靠:① `kAudioProcessPropertyIsRunningOutput` 是布尔值,暂停后**不一定归零**(浏览器/AVAudioPlayer 暂停仍占着输出流,DEV-075);② 系统混音是所有 app 的叠加,别的声源还在响时「有声」永远为真,无法归属到具体 app(DEV-079);③ `playbackRate` 只有上报型 app 有,而且 2s 才更新一次。
+- **Prevention:** ① 新增 `AppAudioProbe`:用 `SCContentFilter(display:including:[app], exceptingWindows:[])` + `capturesAudio` 给目标 app 单独开一条捕获流(16×16@1fps、只算峰值不跑 FFT),按「有没有能量」判它在不在出声,0.3s 保持。复用截图已有的屏幕录制权限,不额外弹授权。② **没收到过音频 buffer 之前绝不说「静音」**:分不清「它本来就静着」和「按 app 捕获对它不生效」,说错会把正在播的卡片判成暂停;只有先听见它出声,之后的静音才可信,否则 `isSounding = nil`,调用方退回旧规则。③ 探针只在面板可见时生效,收起面板即停掉捕获流,不留空转。④ 探针拿不到电平时用**锁存**(`audioOnlyLatch`)兜底:只认正向证据(离开出声列表=停、重新进入=播、混音由静变响且单一候选=播、点击意图),不再用「混音有声 + 在列表里」每次重推。⑤ 上报型 app(`.mediaRemote`)直接信 `playbackRate`。
+- **代价:** 多一条捕获流;按 app 捕获对个别 app 可能不生效(靠 `nil` 退回锁存);系统音量 0 时探针听不到声音,卡片会显示暂停(与律动一致)。
+- **验证:** `notchDebug` 打开,日志应看到 `AppAudio: 探测 pid=... bundle=...`,暂停时 `NowPlaying: 探针 静音 → <bid>`(0.3s 内),律动同时压平。看不到 `AppAudio: 探测` 说明该 app 拿不到捕获对象,走锁存兜底。
 
 ## DEV-088: ⌘⇥ 缩略图「每次都在重新加载」——缓存三处配置合起来等于没缓存
 
@@ -569,22 +422,17 @@
 - **验证:** `ZEROFLOW_SWITCHER_DEBUG=1` 启动,连按两次 ⌘⇥,`/tmp/zeroflow.log` 里第二次应出现 `SWITCHER present windows=N cachedPrefill=N`(N 相等 = 全命中),面板当帧就有缩略图。
 
 ## DEV-089: 只探「当前播放器」一个 app 时,多音源下卡片会永久粘在暂停的那个上
-
-- **Pitfall:** 两个音源同时存在(比如 Chrome 在放视频、QQ音乐也放过),把 QQ音乐暂停后,卡片停在「QQ音乐 · 已暂停」上再也不动——哪怕 Chrome 一直在响、甚至换了新视频。用户看到的就是「卡片停在错的 app 上」,而且没有任何操作能把它挪回来(除非重启 app 或退出 QQ音乐)。
-- **Cause:** 三条串起来,没有任何出路:① `updateCurrent` 的换人条件只有「`operatedAt` 比 `current.at` 晚」和「它退出了」——暂停不算,`current` 永久粘住(DEV-084 的设计);② 顶掉它需要的 `operatedAt` 更新只发生在「新进出声列表 / `playbackRate` 停转播 / 混音静→响且**只有一个**候选 / 会话曲名变化」四个信号上,而多音源下第 3 条刻意不猜、Chrome 一直在播也不会重新进列表,于是 Chrome 永远拿不到新时间戳;③ `read()` 里 `audioOnlyInfo(current)` 只要 app 还活着就非 nil,所以「current 暂停 + Chrome 在响」时连 `media` 分支都轮不到,Chrome 根本没机会出卡。根子是**探针只给 current 一个 app 建流**,系统里没有任何接口能回答「另一个 app 现在是不是在响」——`audible` 是所有 app 的叠加(DEV-079),`IsRunningOutput` 暂停后不归零(DEV-075)。
-- **Prevention:**
-  ① `AppAudioProbe` 从单目标改成**多目标**:`setTargets([Target])` 给白名单内每个「在出声列表里的 app」各建一条 16×16@1fps 纯音频流(白名单最多 3 个),每条流独立的 `Probe`(自己的 stream/generation/lastSoundAt) + 独立 `Sink` 回调代理,10Hz 汇总成 `levels: [String: Bool]` 发布;`sounding(for:)` 走 `NSLock` 保护的快照,轮询队列和主线程都能读。
-  ② `updateCurrent` 加第三条换人路径 `handoverCandidate`:**current 确认静了 + 某个候选确认在响** → 让位(新 `at` 用 now)。current 静了的判定分两路:有探针值就只信探针;没探针值(它暂停后离开出声列表,我们不给不在输出的 app 建流)就看「离开列表多久了 > 1s」——`IsRunningOutput` 只有假阳性,不在列表里就是真的没在输出。1s 防抖是为了躲「app 刚恢复播放、进程注册晚一拍」的瞬时缺失;面板重开时也把计时器重置,免得一打开就按「谁在响」重挑(DEV-087)。
-  ③ `applyLevels` 发现卡片上的 app 刚静、而别的候选在响时立刻 `tick()` 催一次,否则换人要等最多 2s 才发生。
-  ④ `audioOnlyLatch` 增加「离开出声列表 = 停」这一条并放到「混音静没静」之前——多音源时混音永远是响的,原来那条判据等于失效。
-  ⑤ 诊断日志 `logCurrent` 每个候选后面带上探针结论(`bid=2.3s/响`),排查「为什么显示的是它」一眼可见。
-- **代价:** 最多 3 条捕获流(每条约一个 16×16@1fps 音频会话),面板打开且有多个音源时多占一点内存和 CPU;按 app 捕获对个别 app 不生效时该候选永远是 `nil`,换人退回保守策略(不动)。**媒体键仍无法定向**(DEV-081),所以换到「非 owner 的 app」上时按钮还是可能控到 owner——这一点没变,但显示至少跟上了实际在响的那个。
-- **验证:** `defaults write com.zeroflow.app notchDebug -bool true`,两个音源同时存在时:日志应出现多条 `AppAudio: 探测 pid=... bundle=...`(每个候选一条);暂停 current 后 1~2s 内出现 `current <A> → <B>(旧的静了、它在响)`,卡片切到在响的那个;`current=... [com.google.Chrome=3.2s/响 com.tencent.QQMusicMac=1.0s/静]` 这行能直接看出谁在响。
+> **已废弃（被 DEV-090 取代）**：`updateCurrent` / `handoverCandidate` / 粘性 current 已删除，保留的是**多目标探针**本身。
+- **Pitfall:** 两个音源同时存在(Chrome 在放视频、QQ音乐也放过),把 QQ音乐暂停后,卡片停在「QQ音乐 · 已暂停」上再也不动——哪怕 Chrome 一直在响、甚至换了新视频。
+- **Cause（仍成立）:** 探针只给一个 app 建流,系统里没有任何接口能回答「另一个 app 现在是不是在响」——`audible` 是所有 app 的叠加(DEV-079),`IsRunningOutput` 暂停后不归零(DEV-075)。
+- **Prevention:** ① `AppAudioProbe` 多目标:`setTargets([Target])` 给白名单内每个「在出声列表里的 app」各建一条 16×16@1fps 纯音频流(白名单最多 3 个),每条流独立的 `Probe`(自己的 stream/generation/lastSoundAt) + 独立 `Sink` 回调代理,10Hz 汇总成 `levels: [String: Bool]` 发布;`sounding(for:)` 走 `NSLock` 保护的快照,轮询队列和主线程都能读。② `applyLevels` 发现卡片上的 app 刚静、而别的候选在响时立刻 `tick()` 催一次,否则要等最多 2s。③ `audioOnlyLatch` 增加「离开出声列表 = 停」这一条并放到「混音静没静」之前——多音源时混音永远是响的,原来那条判据等于失效。④ 诊断日志里每个候选后面带上探针结论(`bid=2.3s/响`),排查「为什么显示的是它」一眼可见。
+- **代价:** 最多 3 条捕获流(每条约一个 16×16@1fps 音频会话),面板打开且有多个音源时多占一点内存和 CPU;按 app 捕获对个别 app 不生效时该候选永远是 `nil`。媒体键仍无法定向(DEV-081)。
+- **验证:** `notchDebug` 打开,两个音源同时存在时:日志应出现多条 `AppAudio: 探测 pid=... bundle=...`(每个候选一条);暂停当前后 1~2s 内卡片切到在响的那个;日志里 `current=... [com.google.Chrome=3.2s/响 com.tencent.QQMusicMac=1.0s/静]` 这行能直接看出谁在响。
 
 ## DEV-090: 卡片显示的对象必须就是媒体命令的路由目标,「粘性 current」是错的
 
 - **Pitfall:** 灵动岛音乐卡片的切换逻辑长期不对:卡片显示 A、按播放/暂停动的却是 B;A 关掉后卡片还挂着它;新开一个音源,卡片不跟过去。用户提了四条硬规则:① 卡片内容和实际能控的 app 必须一致;② 点播放/暂停一定控卡片上那个 app 的音源;③ 音源关闭时卡片若显示它就必须清掉,有第二音源就显示第二个,没有就不显示;④ 新音源开播时尽量显示最新的(前提是 1、2 成立)。
-- **Cause:** 展示对象(`current`,粘性)和控制目标(now playing owner)是两套独立状态。`MRMediaRemoteSendCommand` 和系统媒体键**只会路由给 owner**,无法定向(DEV-081),所以卡片一旦显示 owner 之外的 app,按下去必然控错——DEV-084 用「粘住暂停的那个 app」来缓解,DEV-089 又加 `handoverCandidate` 让它在「旧的静了、别人在响」时让位,但让位后显示的正是**非 owner**,照样控错。根子是把「显示」当成独立问题在解,而它和控制共用同一个不可定向的通道。
+- **Cause:** 展示对象(`current`,粘性)和控制目标(now playing owner)是两套独立状态。`MRMediaRemoteSendCommand` 和系统媒体键**只会路由给 owner**,无法定向(DEV-081),所以卡片一旦显示 owner 之外的 app,按下去必然控错——早先用「粘住暂停的那个 app」来缓解,后来又加 `handoverCandidate` 让它在「旧的静了、别人在响」时让位(见 DEV-089),但让位后显示的正是**非 owner**,照样控错。根子是把「显示」当成独立问题在解,而它和控制共用同一个不可定向的通道。
 - **Prevention:** **把展示对象直接定义成 owner**,别再维护第二套状态:
   ① 子进程读取(`readViaSubprocess`)输出**两段**:`owner`(playerPath.client 的 bundleID)+ 条目(曲名/歌手/进度)。QQ音乐这类 app 只注册媒体键路由、不发元数据——item 是 nil 但 owner 有值,旧脚本在 `NOITEM` 处直接返回把 owner 丢了,正是粘性猜测的来源;
   ② `read()` 只按 owner 出卡:owner 上报了元数据 → 会话卡(控制 `.mediaRemote`);没上报 → AX/窗口标题兜底卡(控制 `.mediaKey`);owner 不在白名单/已退出 → **不出卡**(显示了也控不到);
@@ -595,13 +443,12 @@
 - **验证:** `defaults write com.zeroflow.app notchDebug -bool true`,日志里 `idle owner=...` / `media app=...（owner）` / `audio-only app=...` 三者只会出现 owner;两个音源交替播放时,卡片跟着 owner 走;`send` 行不再出现「⚠️不一致」,只可能出现「放弃 ...（路由目标已换人）」;关掉卡片上那个 app,卡片当帧清空或换成另一个音源。
 
 ## DEV-091: FinderSync 扩展的进程归 pkd 管,app 一律不碰(历史:一次 election 翻转会起两个实例)
-
 - **Pitfall:** 打开 app 后 `pgrep -fl FinderSyncExtension` 出来**两个**同路径进程,argv 只差 `-AppleLanguages`(一个系统语言 `("zh-Hans-CN","ja-CN")`、一个 app 关联语言 `("zh-Hans","zh-Hans-CN","ja-CN")`),启动时间相差 8ms;杀掉后只要 app 不在跑就再也不会自己起来。
-- **Cause:** `MenuBarController` 启动 2s 后无条件调 `FinderSyncReloader.reloadIfNeeded()` → `pluginkit -e ignore` + `-e use`。**一次 election 翻转会让 pkd 同时起两个实例**;把 LaunchServices 里 8 份历史登记(DerivedData、`/private/tmp/zf-warn*`、`zf3-*`、`.Trash`、旧 DMG 卷)全清到只剩 `/Applications` 一条之后,翻转仍然起 2 个——所以重复登记只是噪音,不是双实例的成因。两个实例里**早的那个是 app 侧**(app 调 `FIFinderSyncController.isExtensionEnabled` 建立的 client 连接,app 退出即死),晚的那个才是 Finder 侧。另有一个关键事实:本机 Finder **不会**按需懒加载扩展,进程不在就完全没有右键菜单。
-- **Prevention(现行):** app 侧零管理——`FinderSyncReloader.swift` 与 `scripts/install-findersync.sh` 已删除,`MenuBarController` 启动不做任何扩展相关动作;设置页只用 `FinderSyncElection` 读一次 `pluginkit -m -i com.zeroflow.app.finderSync` 的 `+`/`-` 显示状态(不写 election、不拉实例、不 pgrep)。主 app 也不再链接 `FinderSync.framework`:`FIFinderSyncController.isExtensionEnabled` 会和 pkd 建 client 连接,正是上面「app 侧实例」的来源。进程数与起停全交给 pkd,与 iTerm2 / Tower / Fork / WPS 同款——appex 塞进 `Contents/PlugIns/`,安装时系统登记一次,之后 Finder 需要菜单时自己拉起。
-- **历史方案(已删,勿复活):** ① 按 appex 指纹(mtime+size)+「当前有没有实例在跑」决定是否重载;② 没实例就 `pluginkit -e ignore` → `-e use` 拉一次;③ 翻转后用 `pgrep` 保留 pid 最大的、`kill -TERM` 掉更早的。教训:任何「app 主动翻 election」都会把实例数搞成 2,再靠 pgrep 收尸,越管越乱;而手动翻 election 只在排障时做一次即可。
-- **排障备忘:** 状态查询日志是 `/tmp/zeroflow.log` 里的 `FinderSyncElection: state=…`(`ZSLog` 写文件);判断「哪个实例是 Finder 侧」最省事的办法是杀 app 看谁还活着(早的那个随 app 退出即死)。沙盒 shell 里查 `pluginkit` 的坑见 DEV-092。另外 `xcodebuild` 在这种 shell 里会因嵌套沙盒挂掉(`swift-plugin-server produced malformed response` / `sandbox-exec: sandbox_apply: Operation not permitted`),要加 `OTHER_SWIFT_FLAGS="-Xfrontend -disable-sandbox"` 才能编译。
-- **2026-11-21 复测(新模型,app 已不链接 FinderSync.framework):** ① 启动/退出 app **都不改变**扩展实例数(app 退出后两个实例都还活着)→ 上面「早的那个是 app 侧」只对旧代码成立;② `kill -TERM` 掉实例后 pkd **不会**重拉(5s 内 0 个);③ 此时 `killall Finder` 重拉**恰好 1 个**;④ 但 Finder 重启**不回收**已有实例——同机 WeType 扩展也是「老实例 + 新实例」并存 2 个。结论:多实例是 pkd「只加不收」,与 app 无关,僵尸实例不参与 `menu(for:)`,功能不受影响;嫌碍眼只能手动 `kill` 或重启后不管,别再写自动回收(会回到数进程的老路)。
+- **Cause:** 旧代码 `MenuBarController` 启动 2s 后无条件调 `FinderSyncReloader.reloadIfNeeded()` → `pluginkit -e ignore` + `-e use`。**一次 election 翻转会让 pkd 同时起两个实例**;把 LaunchServices 里 8 份历史登记(DerivedData、`/private/tmp/zf-warn*`、`zf3-*`、`.Trash`、旧 DMG 卷)全清到只剩 `/Applications` 一条之后,翻转仍然起 2 个——所以重复登记只是噪音,不是双实例的成因。另有一个关键事实:本机 Finder **不会**按需懒加载扩展,进程不在就完全没有右键菜单。
+- **Prevention(现行):** app 侧零管理——`FinderSyncReloader.swift` 与 `scripts/install-findersync.sh` 已删除,`MenuBarController` 启动不做任何扩展相关动作;设置页只用 `FinderSyncElection` 读一次 `pluginkit -m -i com.zeroflow.app.finderSync` 的 `+`/`-` 显示状态(不写 election、不拉实例、不 pgrep)。主 app 也不再链接 `FinderSync.framework`:`FIFinderSyncController.isExtensionEnabled` 会和 pkd 建 client 连接,正是「app 侧实例」的来源。进程数与起停全交给 pkd,与 iTerm2 / Tower / Fork / WPS 同款——appex 塞进 `Contents/PlugIns/`,安装时系统登记一次,之后 Finder 需要菜单时自己拉起。
+- **历史方案(已删,勿复活):** 按 appex 指纹决定是否重载 → `pluginkit -e ignore/-e use` 拉一次 → `pgrep` 保留 pid 最大的、杀更早的。教训:任何「app 主动翻 election」都会把实例数搞成 2,再靠 pgrep 收尸,越管越乱。
+- **排障备忘:** 状态查询日志是 `/tmp/zeroflow.log` 里的 `FinderSyncElection: state=…`;判断「哪个实例是 Finder 侧」最省事的办法是杀 app 看谁还活着。沙盒 shell 里查 `pluginkit` 的坑见 DEV-092;沙盒 shell 里 `xcodebuild` 挂掉见 DEV-057。
+- **2026-11-21 复测(新模型,app 已不链接 FinderSync.framework):** ① 启动/退出 app **都不改变**扩展实例数(app 退出后两个实例都还活着);② `kill -TERM` 掉实例后 pkd **不会**重拉(5s 内 0 个);③ 此时 `killall Finder` 重拉**恰好 1 个**;④ Finder 重启**不回收**已有实例——同机 WeType 扩展也是「老实例 + 新实例」并存 2 个。结论:多实例是 pkd「只加不收」,与 app 无关,僵尸实例不参与 `menu(for:)`,功能不受影响;嫌碍眼只能手动 `kill`,别再写自动回收。
 
 ## DEV-092: 沙盒 shell 里查 pluginkit 一律 unauthorized;扩展登记/排障的手工配方
 - **Pitfall:** 在 agent/IDE 的 shell 里跑 `pluginkit -m [-i <id>]` 全部返回 `match: unauthorized discovery flag (PKDiscoverAll)`、exit=1;连从这个 shell 直接执行的 `Zeroflow.app/Contents/MacOS/Zeroflow` 也一样(子进程继承 shell 的 seatbelt),极易误判成「app 里也查不到扩展状态」。
@@ -613,10 +460,10 @@
 APP=/Applications/Zeroflow.app
 APPEX=$APP/Contents/PlugIns/FinderSyncExtension.appex
 LS=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-# ① 清掉 LS 里所有旧路径登记(DEV-007)
+# ① 清掉 LS 里所有旧路径登记
 $LS -dump | grep -oE "/[^ ]*Zeroflow\.app([^ ])*" | sort -u | while read p; do $LS -u "$p"; done
 $LS -f $APP
-# ② pkd 僵死就重启它(DEV-006),再登记一次
+# ② pkd 僵死就重启它,再登记一次
 killall pkd; sleep 3
 pluginkit -a $APPEX; sleep 2
 pluginkit -m -i com.zeroflow.app.finderSync   # 期望 "+    com.zeroflow.app.finderSync(1.0)"

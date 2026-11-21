@@ -19,7 +19,7 @@
 
 ## DEV-004: 新增 target 需手改 pbxproj,改错直接 BUILD FAILED
 - **Pitfall:** 以为 `.swift` 文件和 target 一样自动纳入工程,新增 target 时漏配;或手改 pbxproj 出错后构建失败。
-- **Cause:** 源文件走 `PBXFileSystemSynchronizedRootGroup` 自动纳入(不要手改 pbxproj 加文件),但 target 本身、Embed App Extensions 阶段、target dependency、FinderSync.framework 链接(App 用于 `FIFinderSyncController.isExtensionEnabled`)都是手工维护的。
+- **Cause:** 源文件走 `PBXFileSystemSynchronizedRootGroup` 自动纳入(不要手改 pbxproj 加文件),但 target 本身、Embed App Extensions 阶段、target dependency 都是手工维护的(主 app 已不再链接 `FinderSync.framework`,见 DEV-091)。
 - **Prevention:** 新增 `.swift` 文件放对应目录即可;新增/调整 target 才动 pbxproj,改完立即构建验证。当前仅 `FinderSyncExtension/` 一个扩展 target,已配好。
 
 ## DEV-005: FinderSync 扩展未沙盒化会被 pkd 静默拒绝
@@ -30,17 +30,17 @@
 ## DEV-006: pkd 进程僵死,新扩展登记不上
 - **Pitfall:** 新扩展 `pluginkit -a` 返回 0 但 `pluginkit -m` 查不到,反复登记无效。
 - **Cause:** pkd 内存会僵住,僵死的旧实例不响应新插件注册。
-- **Prevention:** 登记后查不到就 `killall pkd` 再查;`scripts/install-findersync.sh` 已内置处理。
+- **Prevention:** 登记后查不到就 `killall pkd` 等几秒再查(`pluginkit -a` 重新登记)。只在登记失败时兜底,不写进例行流程。
 
 ## DEV-007: LaunchServices 残留旧路径插件记录导致 pkd 拒绝扩展
 - **Pitfall:** pkd 解析到无效路径(如 build 目录里的旧 app/appex)而拒绝扩展。
 - **Cause:** LS 记录了旧路径的插件(重复构建产物留下的登记),优先于新路径被解析。
-- **Prevention:** 先 `lsregister -u` 所有旧路径的 app 及其 appex,再只注册 /Applications;`install-findersync.sh` 已内置处理。
+- **Prevention:** 先 `lsregister -u` 所有旧路径的 app 及其 appex,再只注册 /Applications(手工配方见 DEV-092)。正常安装(拖进 /Applications)不会踩到,只在反复从 build 目录直接运行后出现。
 
 ## DEV-008: macOS Sequoia/Tahoe 覆盖安装后 Finder 右键菜单消失(陈旧扩展实例)
-- **Pitfall:** app 重建/覆盖安装后,扩展显示已启用(`FIFinderSyncController.isExtensionEnabled` 为 true、设置页绿色),但 Finder 右键菜单不出现;手动关闭再开启一次即恢复。
-- **Cause:** pkd 与 Finder 仍持有旧扩展实例;已程序化复现(`pluginkit -e ignore` → `-e use` 的 election 循环)。
-- **Prevention:** 主 app 启动自愈走 `Zeroflow/Services/FinderSyncReloader.swift`,设置页有「刷新右键菜单扩展」按钮;安装用 `scripts/install-findersync.sh`(支持 `--reload-only` 仅重载)。
+- **Pitfall:** app 重建/覆盖安装后,扩展显示已启用(`pluginkit -m` 里是 `+`、设置页绿色),但 Finder 右键菜单不出现;手动关闭再开启一次即恢复。
+- **Cause:** pkd 与 Finder 仍持有旧扩展实例;只有切换 election 或重启 Finder 才会重新拉起新实例。
+- **Prevention:** **不再由 app 自愈**——扩展只当右键菜单注入器,app 不碰 election、不数进程、不管起停(见 DEV-091),陈旧实例只能手动处理:系统设置「登录项与扩展」里把 zeroflow 的 FinderSync 关开一次,或 `killall Finder`。历史方案(启动 2s 后 `pluginkit -e ignore → -e use` 翻转 election + `pgrep` 杀多余实例 + 设置页「刷新右键菜单扩展」按钮 + `scripts/install-findersync.sh`)已整体删除:一次翻转会起两个实例(DEV-091),副作用比问题本身更烦。
 
 ## DEV-009: Finder 右键菜单位置无法调整
 - **Pitfall:** 尝试把扩展的右键菜单项放到菜单顶部/中间,无法实现。
@@ -593,3 +593,33 @@
   ⑤ `send()` 发送前用子进程再核一次 owner(异步 ~80ms,按钮不卡),不一致就**不发**、改 `tick()` 刷新卡片——这是「点谁控谁」的最后一道闸,把「这一两秒内 owner 换人」的窗口也堵掉。
 - **代价:** owner 被别的 app 占着时(Chrome 挂着暂停会话),正在响的 QQ音乐控不到,卡片会显示 owner(Chrome 暂停态)而不是在响的那个——这是 macOS 路由的现实,不是能靠显示逻辑绕过的;反过来「显示在响的、按钮控 owner」才是用户明确否掉的错。Chrome 重新注册会话(切窗口)时卡片可能跟着换人,与系统 Now Playing 的行为一致(其他 mac 灵动岛同款)。
 - **验证:** `defaults write com.zeroflow.app notchDebug -bool true`,日志里 `idle owner=...` / `media app=...（owner）` / `audio-only app=...` 三者只会出现 owner;两个音源交替播放时,卡片跟着 owner 走;`send` 行不再出现「⚠️不一致」,只可能出现「放弃 ...（路由目标已换人）」;关掉卡片上那个 app,卡片当帧清空或换成另一个音源。
+
+## DEV-091: FinderSync 扩展的进程归 pkd 管,app 一律不碰(历史:一次 election 翻转会起两个实例)
+
+- **Pitfall:** 打开 app 后 `pgrep -fl FinderSyncExtension` 出来**两个**同路径进程,argv 只差 `-AppleLanguages`(一个系统语言 `("zh-Hans-CN","ja-CN")`、一个 app 关联语言 `("zh-Hans","zh-Hans-CN","ja-CN")`),启动时间相差 8ms;杀掉后只要 app 不在跑就再也不会自己起来。
+- **Cause:** `MenuBarController` 启动 2s 后无条件调 `FinderSyncReloader.reloadIfNeeded()` → `pluginkit -e ignore` + `-e use`。**一次 election 翻转会让 pkd 同时起两个实例**;把 LaunchServices 里 8 份历史登记(DerivedData、`/private/tmp/zf-warn*`、`zf3-*`、`.Trash`、旧 DMG 卷)全清到只剩 `/Applications` 一条之后,翻转仍然起 2 个——所以重复登记只是噪音,不是双实例的成因。两个实例里**早的那个是 app 侧**(app 调 `FIFinderSyncController.isExtensionEnabled` 建立的 client 连接,app 退出即死),晚的那个才是 Finder 侧。另有一个关键事实:本机 Finder **不会**按需懒加载扩展,进程不在就完全没有右键菜单。
+- **Prevention(现行):** app 侧零管理——`FinderSyncReloader.swift` 与 `scripts/install-findersync.sh` 已删除,`MenuBarController` 启动不做任何扩展相关动作;设置页只用 `FinderSyncElection` 读一次 `pluginkit -m -i com.zeroflow.app.finderSync` 的 `+`/`-` 显示状态(不写 election、不拉实例、不 pgrep)。主 app 也不再链接 `FinderSync.framework`:`FIFinderSyncController.isExtensionEnabled` 会和 pkd 建 client 连接,正是上面「app 侧实例」的来源。进程数与起停全交给 pkd,与 iTerm2 / Tower / Fork / WPS 同款——appex 塞进 `Contents/PlugIns/`,安装时系统登记一次,之后 Finder 需要菜单时自己拉起。
+- **历史方案(已删,勿复活):** ① 按 appex 指纹(mtime+size)+「当前有没有实例在跑」决定是否重载;② 没实例就 `pluginkit -e ignore` → `-e use` 拉一次;③ 翻转后用 `pgrep` 保留 pid 最大的、`kill -TERM` 掉更早的。教训:任何「app 主动翻 election」都会把实例数搞成 2,再靠 pgrep 收尸,越管越乱;而手动翻 election 只在排障时做一次即可。
+- **排障备忘:** 状态查询日志是 `/tmp/zeroflow.log` 里的 `FinderSyncElection: state=…`(`ZSLog` 写文件);判断「哪个实例是 Finder 侧」最省事的办法是杀 app 看谁还活着(早的那个随 app 退出即死)。沙盒 shell 里查 `pluginkit` 的坑见 DEV-092。另外 `xcodebuild` 在这种 shell 里会因嵌套沙盒挂掉(`swift-plugin-server produced malformed response` / `sandbox-exec: sandbox_apply: Operation not permitted`),要加 `OTHER_SWIFT_FLAGS="-Xfrontend -disable-sandbox"` 才能编译。
+- **2026-11-21 复测(新模型,app 已不链接 FinderSync.framework):** ① 启动/退出 app **都不改变**扩展实例数(app 退出后两个实例都还活着)→ 上面「早的那个是 app 侧」只对旧代码成立;② `kill -TERM` 掉实例后 pkd **不会**重拉(5s 内 0 个);③ 此时 `killall Finder` 重拉**恰好 1 个**;④ 但 Finder 重启**不回收**已有实例——同机 WeType 扩展也是「老实例 + 新实例」并存 2 个。结论:多实例是 pkd「只加不收」,与 app 无关,僵尸实例不参与 `menu(for:)`,功能不受影响;嫌碍眼只能手动 `kill` 或重启后不管,别再写自动回收(会回到数进程的老路)。
+
+## DEV-092: 沙盒 shell 里查 pluginkit 一律 unauthorized;扩展登记/排障的手工配方
+- **Pitfall:** 在 agent/IDE 的 shell 里跑 `pluginkit -m [-i <id>]` 全部返回 `match: unauthorized discovery flag (PKDiscoverAll)`、exit=1;连从这个 shell 直接执行的 `Zeroflow.app/Contents/MacOS/Zeroflow` 也一样(子进程继承 shell 的 seatbelt),极易误判成「app 里也查不到扩展状态」。
+- **Cause:** pluginkit 的 discovery 需要非沙盒的 GUI 会话进程;seatbelt 沙盒下 `PKDiscoverAll` 判为未授权。
+- **Prevention:** 验证这类查询用 `open -n <app>`(launchd 拉起,不继承 shell 沙盒)或临时探针 .app 把结果写文件。正常输出形态是 `+    com.zeroflow.app.finderSync(1.0)`(`+` 启用 / `-` 停用),`FinderSyncElection` 按行首符号解析,查不到就退化成 `.unknown`,UI 不会误报「未启用」。
+- **手工登记/排障配方**(`scripts/install-findersync.sh` 已删,正常安装=拖进 /Applications,不需要这些;只在 pkd 解析到旧路径时用):
+
+```bash
+APP=/Applications/Zeroflow.app
+APPEX=$APP/Contents/PlugIns/FinderSyncExtension.appex
+LS=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+# ① 清掉 LS 里所有旧路径登记(DEV-007)
+$LS -dump | grep -oE "/[^ ]*Zeroflow\.app([^ ])*" | sort -u | while read p; do $LS -u "$p"; done
+$LS -f $APP
+# ② pkd 僵死就重启它(DEV-006),再登记一次
+killall pkd; sleep 3
+pluginkit -a $APPEX; sleep 2
+pluginkit -m -i com.zeroflow.app.finderSync   # 期望 "+    com.zeroflow.app.finderSync(1.0)"
+```
+
+- **菜单不出现时的排查顺序:** `pluginkit -m -i` 是 `+` → 系统设置「登录项与扩展」里把扩展关开一次 → `killall Finder` → 上面的配方。

@@ -69,10 +69,10 @@
     "en": "Finder Extension Enabled",
     "ja": "Finder 拡張が有効です"
   },
-  "刷新右键菜单扩展": {
-    "zh-Hans": "刷新右键菜单扩展",
-    "en": "Refresh Context Menu Extension",
-    "ja": "コンテキストメニュー拡張を再読み込み"
+  "无法读取访达扩展状态": {
+    "zh-Hans": "无法读取访达扩展状态",
+    "en": "Unable to read Finder Extension status",
+    "ja": "Finder 拡張の状態を取得できません"
   },
   "尚未在系统中启用访达扩展": {
     "zh-Hans": "尚未在系统中启用访达扩展",

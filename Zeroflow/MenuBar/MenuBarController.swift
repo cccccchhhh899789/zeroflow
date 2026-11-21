@@ -78,11 +78,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSWindowDelegate
         ClipboardMonitor.shared.reapply()
         ClipboardPanelController.shared.reapply()
 
-        // 右键菜单扩展自愈：Sequoia/Tahoe 下 FinderSync 扩展更新后常有「已启用但右键菜单
-        // 不出现」的陈旧实例问题，启动时若已启用则重载一次，保证右键菜单立即可用。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            FinderSyncReloader.reloadIfNeeded()
-        }
+        // 右键菜单扩展：不在这里做任何事。appex 只是注入器，起停与实例数全交给 pkd
+        // （见 FinderSyncElection 的说明与 PITFALLS_DEV.md DEV-091）。
 
         if ProcessInfo.processInfo.environment["ZEROFLOW_AUTO_CAPTURE"] == "1" {
             ZSLog("env ZEROFLOW_AUTO_CAPTURE: defer 1.5s then capture")

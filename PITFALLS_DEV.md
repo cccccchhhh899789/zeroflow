@@ -90,7 +90,7 @@
 ## DEV-018: ad-hoc 签名的扩展对 App Group 容器只读,写请求文件 EPERM,「打开终端」静默失效
 - **Pitfall:** 「访达右键 → 打开终端」点击毫无反应,而「新建空文件」(纯扩展内动作)正常,极具迷惑性。扩展 os_log 仅报 `submit: failed to write`,底层为 `NSCocoaErrorDomain Code=513 / NSPOSIXErrorDomain Code=1 (EPERM)`;group container 里从未出现 `finder-command-*.plist`,主 app 日志零条 `finderCommand`。GitHub CI 的 ad-hoc 包必现,Team 签名构建正常。
 - **Cause:** ad-hoc 签名(`TeamIdentifier=not set`)的沙盒扩展,系统不认可其 `com.apple.security.application-groups` entitlement,沙盒只放行 group container 的**读**、**写**被拒(EPERM)。扩展读设置正常所以菜单/文案都正常,只有「写请求文件」这一步死;非沙盒主 app 不受沙盒中介、读写都正常——这种读写不对称掩盖了问题。Team 签名(真证书)即可放行写,实测无需嵌入 provisioning profile。
-- **Prevention:** 涉及 FinderSync 扩展的产物必须 Team 签名(`CODE_SIGN_IDENTITY="Apple Development" DEVELOPMENT_TEAM=8NHN73Q43T`)。CI 已加 `Import signing certificate` 步骤从 secrets 导入证书,发 tag 时断言 appex `TeamIdentifier=8NHN73Q43T`;无 secrets 回退 ad-hoc 仅限编译检查(那种包右键命令功能无效)。排障用 `log show --info --predicate 'subsystem == "com.zeroflow.app.finderSync"'`(必须 `--info`,否则只剩 error 级);`CustomCommandRunner.submit` 的失败日志已改为输出真实 NSError + 完整路径(之前只打布尔,排障信息为零)。
+- **Prevention:** 涉及 FinderSync 扩展的产物必须 Team 签名(`CODE_SIGN_IDENTITY="Apple Development"`,Team ID 由 `Config/Local.xcconfig` 提供——本机私有、不入库;CI 走仓库变量 `APPLE_TEAM_ID`)。CI 已加 `Import signing certificate` 步骤从 secrets 导入证书,发 tag 时断言 appex `TeamIdentifier=$CS_TEAM`;无 secrets 回退 ad-hoc 仅限编译检查(那种包右键命令功能无效)。排障用 `log show --info --predicate 'subsystem == "com.zeroflow.app.finderSync"'`(必须 `--info`,否则只剩 error 级);`CustomCommandRunner.submit` 的失败日志已改为输出真实 NSError + 完整路径(之前只打布尔,排障信息为零)。
 
 ## DEV-019: MediaRemote 私有框架在 macOS 15.4+ 的可用读取路径与 JXA 细节
 - **Pitfall:** `MRMediaRemoteGetNowPlayingInfo` C 函数在 15.4+ 被封(符号在但回调永不来);legacy `MediaRemote` ObjC 类在 macOS 27 已不存在;JXA 里 NSBundle 调用 `-loadBundle` 报 "not a function"(方法名是 `-load`)。

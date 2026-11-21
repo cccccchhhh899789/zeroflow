@@ -8,6 +8,8 @@ macOS 截图菜单栏工具(截图 + 画线/矩形/圆框/文字气泡/马赛克
 
 ### 构建(xcodebuild 通过 = 唯一验证方式,无测试/lint)
 
+**首次 clone 必做**:`cp Config/Local.xcconfig.example Config/Local.xcconfig` 并填入你的 Apple Developer Team ID。工程文件里不存 Team ID——它由 project 级 `Config/Shared.xcconfig` 的 `#include? "Local.xcconfig"` 注入,`Local.xcconfig` 已 gitignore。缺这个文件时 `DEVELOPMENT_TEAM` 为空,本地签名会直接失败。
+
 ```bash
 # 本地 Debug(必须带 -allowProvisioningUpdates:FinderSync 扩展的 App Group 需自动生成 provisioning)
 xcodebuild -project Zeroflow.xcodeproj -scheme Zeroflow -configuration Debug -derivedDataPath build -allowProvisioningUpdates build

@@ -17,3 +17,6 @@ xcuserdata/
 *.log
 .env
 build-baseline/
+
+# 本机私有构建设置（含 Apple Developer Team ID）
+Config/Local.xcconfig

@@ -75,7 +75,13 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASS" "$KC_PATH"
           security list-keychain -d user -s "$KC_PATH" login.keychain
           echo "CS_IDENTITY=Apple Development" >> "$GITHUB_ENV"
-          echo "CS_TEAM=8NHN73Q43T" >> "$GITHUB_ENV"
+          # Team ID 不入库：在仓库 Settings → Secrets and variables → Actions → Variables
+          # 里加一个 APPLE_TEAM_ID（值是你的 10 位 Apple Developer Team ID）。
+          if [ -z "${{ vars.APPLE_TEAM_ID }}" ]; then
+            echo "::error::已导入签名证书但缺少 APPLE_TEAM_ID 仓库变量——请在 Variables 里补上 Team ID，否则签名无效、扩展拿不到 App Group 写权限"
+            exit 1
+          fi
+          echo "CS_TEAM=${{ vars.APPLE_TEAM_ID }}" >> "$GITHUB_ENV"
 
       # 应用内更新检测拿 CFBundleShortVersionString 与 GitHub tag 比大小，
       # 必须让构建产物的版本号跟 tag 对齐：tag 构建注入 vX.Y.Z 去掉 v，

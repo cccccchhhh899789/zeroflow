@@ -47,7 +47,7 @@ enum ControlChannel {
 ///
 /// **核心不变式：卡片显示谁，播放/暂停就控谁**（DEV-090）。
 /// `MRMediaRemoteSendCommand` 和系统媒体键都只会路由给当前 now playing owner，
-/// 没有私有授权就无法定向到别的 app（DEV-078/081）——所以展示对象必须就是 owner。
+/// 没有私有授权就无法定向到别的 app（DEV-081）——所以展示对象必须就是 owner。
 /// 曾经的「粘性 current」与此相反：卡片可以粘在 owner 之外的 app 上，按下去控到
 /// 的是别人（卡片是 QQ音乐、按钮动了 Chrome），已整体废弃。
 ///

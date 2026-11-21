@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import FinderSync
 
 /// 设置页标签页
 enum SettingsTab: String, CaseIterable {
@@ -701,36 +700,31 @@ private struct ScreenRecordingPermissionRow: View {
 }
 
 /// 访达扩展的启用状态与引导（与 ScreenRecordingPermissionRow 样式一致）
+///
+/// 只读 pluginkit 的选举结果，不做任何重载/拉起动作——扩展的起停完全交给 pkd。
 private struct FinderSyncPermissionRow: View {
-    @State private var enabled = FIFinderSyncController.isExtensionEnabled
+    @State private var state: FinderSyncElection.State?
 
     var body: some View {
         Group {
-            if enabled {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label(L10n.tr("访达扩展已启用"), systemImage: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                    // 陈旧实例自愈：macOS Sequoia/Tahoe 下扩展更新后可能「已启用但右键菜单不出现」，
-                    // 此按钮复现系统设置里的「关闭→打开」，强制 pkd 重载扩展实例。
-                    Button(L10n.tr("刷新右键菜单扩展")) {
-                        FinderSyncReloader.reloadIfNeeded(force: true) { _ in
-                            DispatchQueue.main.async {
-                                recheck()
-                            }
-                        }
-                    }
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label(L10n.tr("尚未在系统中启用访达扩展"), systemImage: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                    Text(L10n.tr("点击下方按钮，在「系统设置 → 通用 → 登录项与扩展 → 扩展」中开启 zeroflow 的「FinderSync」扩展。"))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Button(L10n.tr("打开扩展管理")) {
-                        FIFinderSyncController.showExtensionManagementInterface()
-                    }
-                }
+            switch state {
+            case .enabled?:
+                Label(L10n.tr("访达扩展已启用"), systemImage: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+            case .disabled?:
+                guidance(
+                    title: L10n.tr("尚未在系统中启用访达扩展"),
+                    icon: "exclamationmark.triangle.fill",
+                    color: .orange
+                )
+            case .unknown?:
+                guidance(
+                    title: L10n.tr("无法读取访达扩展状态"),
+                    icon: "questionmark.circle",
+                    color: .secondary
+                )
+            case nil:
+                EmptyView()
             }
         }
         .onAppear {
@@ -741,8 +735,30 @@ private struct FinderSyncPermissionRow: View {
         }
     }
 
+    private func guidance(title: String, icon: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: icon)
+                .foregroundColor(color)
+            Text(L10n.tr("点击下方按钮，在「系统设置 → 通用 → 登录项与扩展 → 扩展」中开启 zeroflow 的「FinderSync」扩展。"))
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Button(L10n.tr("打开扩展管理")) {
+                openExtensionManagement()
+            }
+        }
+    }
+
+    /// 不用 FIFinderSyncController.showExtensionManagementInterface()：主 app 已不链接
+    /// FinderSync.framework，直接开「登录项与扩展」面板。
+    private func openExtensionManagement() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!
+        NSWorkspace.shared.open(url)
+    }
+
     private func recheck() {
-        enabled = FIFinderSyncController.isExtensionEnabled
+        FinderSyncElection.query { newState in
+            state = newState
+        }
     }
 }
 

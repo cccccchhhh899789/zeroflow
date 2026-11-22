@@ -30,6 +30,16 @@ struct NowPlayingInfo {
                        appName: appName, pid: pid, isPlaying: isPlaying, elapsed: elapsed,
                        duration: duration, control: control)
     }
+
+    /// 把身份换成宿主 app。WebKit 媒体进程上报的条目 bundleID 是 `com.apple.WebKit.GPU`，
+    /// 而图标、探针键、`send()` 核对、「打开」按钮全都要宿主 bundle（`com.apple.Safari`）才对得上。
+    /// `control` 用来覆盖控制通道：Safari 的网页媒体**不吃 MR 命令**（见 `read()` 里的实测）
+    func adopting(host: String, app: NSRunningApplication, control: ControlChannel) -> NowPlayingInfo {
+        NowPlayingInfo(title: title, artist: artist, album: album, appBundleID: host,
+                       appName: app.localizedName, pid: app.processIdentifier,
+                       isPlaying: isPlaying, elapsed: elapsed,
+                       duration: duration, control: control)
+    }
 }
 
 /// 播放控制的三条通道（能力从强到弱）
@@ -38,6 +48,9 @@ enum ControlChannel {
     case mediaRemote
     /// app 不上报，靠系统媒体键控；能点到「当前在播的那个会话」即可
     case mediaKey
+    /// 网页播放器（Safari/WebKit）：AX 点页面里的播放/暂停按钮优先，找不到退回媒体键。
+    /// 为什么不用 mediaKey：B站这类页面会把自己的播放态顶回来（点了暂停又自动播）
+    case axPress
     /// 控不到（既不上报也不是 owner）。展示对象已收敛为 owner（DEV-090），
     /// 正常路径不再产出这个值，保留它是给 UI 的置灰判断和将来「只展示不可控」的场景
     case none
@@ -78,19 +91,31 @@ final class NowPlayingMonitor: ObservableObject {
     private static let interval: TimeInterval = 2
     /// 连续多少次读不到内容后才清空展示(避免瞬时失败闪空)
     private static let staleLimit = 3
-    /// 「正在播放」卡片只展示/控制这些 app。用 `sameApp` 前缀比对，
-    /// 这样 Chrome 的 audio helper（com.google.Chrome.helper）、
-    /// QQ音乐被归并的 WebKit 媒体进程（归并后是宿主 bundle）都能命中。
-    private static let allowedBundles = [
+    /// 「正在播放」卡片只展示/控制这些 app = 音乐类白名单（`MusicApps`，唯一来源）+ 浏览器。
+    /// 用 `sameApp` 前缀比对，这样 Chrome 的 audio helper（com.google.Chrome.helper）能命中；
+    /// Safari 的出声进程是 `com.apple.WebKit.GPU`（名字「Safari Graphics and Media」），
+    /// 靠 `AudioActivityMonitor.webKitHost` 按名字归并回 `com.apple.Safari` 后再比对。
+    /// 浏览器单独列在这里、不进 `MusicApps`：它该被放行，但不该在「已知播放器」的排序里抢位
+    private static let allowedBundles = MusicApps.bundles + [
         "com.google.Chrome",
-        "com.tencent.QQMusicMac",
-        "com.apple.Music",
+        "com.apple.Safari",
     ]
 
     /// bundleID 是否在白名单里（nil = 无归属，一律拒绝）
     static func isAllowed(_ bundleID: String?) -> Bool {
         guard let bundleID else { return false }
         return allowedBundles.contains { AudioActivityMonitor.sameApp(bundleID, $0) }
+    }
+
+    /// 路由目标的 bundleID → **宿主 app** 的 bundleID。
+    ///
+    /// 只有 WebKit 媒体进程需要归并：Safari 放网页音视频时 owner 是 `com.apple.WebKit.GPU`，
+    /// 不是 `com.apple.Safari`。这一步必须在**读取入口**统一做——白名单判定、图标、
+    /// 探针键（`AppAudioProbe` 按宿主 bundle 建流）、`send()` 的 owner 核对全靠它对齐。
+    /// 其余 bundleID 原样返回（Chrome helper 那种前缀关系由 `sameApp` 处理，不用改）
+    static func hostBundleID(for bundleID: String?) -> String? {
+        guard let bundleID, bundleID.hasPrefix("com.apple.WebKit.") else { return bundleID }
+        return AudioActivityMonitor.webKitHostBundleID(for: bundleID, allowed: isAllowed) ?? bundleID
     }
 
     /// bundleID 对应的**宿主 app**（卡片上「打开」按钮要激活的那个进程）。nil = 没在运行。
@@ -206,6 +231,24 @@ final class NowPlayingMonitor: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                 if Self.debug { ZSLog("NowPlaying: debug 轮询触发 self=\(self != nil)") }
                 self?.setActiveOnMain(true)
+            }
+        }
+        // 无 UI 验证控制通道:`ZEROFLOW_NOWPLAYING_TOGGLE=<秒>[:<次数>]` 启动后自动点 N 次播放/暂停。
+        // 走的是和卡片按钮完全相同的 `send()` 路径(含 owner 核对、待确认窗口),
+        // 排查「按钮按下去没反应」时不用手点灵动岛
+        scheduleDebugToggles()
+    }
+
+    private func scheduleDebugToggles() {
+        guard let spec = ProcessInfo.processInfo.environment["ZEROFLOW_NOWPLAYING_TOGGLE"] else { return }
+        let parts = spec.split(separator: ":")
+        guard let delay = Double(parts.first ?? "") else { return }
+        let count = parts.count > 1 ? (Int(parts[1]) ?? 1) : 1
+        for i in 0..<max(1, count) {
+            let at = delay + Double(i) * 3
+            DispatchQueue.main.asyncAfter(deadline: .now() + at) { [weak self] in
+                ZSLog("NowPlaying: debug 自动 toggle #\(i + 1)")
+                self?.send(.togglePlay)
             }
         }
     }
@@ -494,8 +537,11 @@ final class NowPlayingMonitor: ObservableObject {
             logIfChanged("read 失败（子进程 + 进程内都没结果）")
             return nil
         }
-        // owner 优先用 playerPath 的 client；条目在、client 读不到时用条目的 bundleID 兜
-        let owner = session.owner ?? session.media?.appBundleID
+        // owner 优先用 playerPath 的 client；条目在、client 读不到时用条目的 bundleID 兜。
+        // `rawOwner` 是系统原样报的（Safari 会报 com.apple.WebKit.GPU），只用来跟条目比对；
+        // 对外一律用归并后的宿主 bundle（`owner`），否则白名单/图标/探针/核对全部对不上
+        let rawOwner = session.owner ?? session.media?.appBundleID
+        let owner = Self.hostBundleID(for: rawOwner)
         let rawActives = AudioActivityMonitor.activeApps(owner: owner)
         let actives = rawActives.filter { Self.isAllowed($0.bundleID) }
         logBlocked(session.media, rawActives: rawActives, actives: actives)
@@ -528,19 +574,29 @@ final class NowPlayingMonitor: ObservableObject {
         }
         lastReadDefinitiveEmpty = false
 
-        // owner 上报了元数据：用会话信息（曲名/进度/播放态更全），控制走 MR 命令
-        if let media = session.media, AudioActivityMonitor.sameApp(media.appBundleID, owner) {
-            logIfChanged("media app=\(media.appBundleID ?? "-")（owner）")
-            return media.setting(pid: app.processIdentifier)
+        // owner 上报了元数据：用会话信息（曲名/进度/播放态更全），控制默认走 MR 命令。
+        // 归属比对用 `rawOwner`：条目和 owner 报的都是 `com.apple.WebKit.GPU`，拿归并后的
+        // Safari 去比会把 Safari 误判成「不上报元数据」，白丢曲名和 MR 控制通道
+        if let media = session.media, AudioActivityMonitor.sameApp(media.appBundleID, rawOwner) {
+            // Safari（WebKit 网页媒体）**不吃 MR 命令**：实测 `MRMediaRemoteSendCommand(2)`
+            // 和 `MRMediaRemoteSendCommandToPlayer` 都返回成功，但 playbackRate 纹丝不动
+            // （1→1），系统媒体键却能控（1→0→1）。所以 WebKit 会话走页面 AX 按钮，
+            // 找不到按钮（原生音视频）再退回媒体键——B站这类页面会跟媒体键抢播放态，
+            // 表现为「点暂停短暂暂停又恢复」，只有真实点击页面按钮才稳（DEV-093）
+            let control: ControlChannel = (rawOwner?.hasPrefix("com.apple.WebKit.") ?? false)
+                ? .axPress : .mediaRemote
+            logIfChanged("media app=\(media.appBundleID ?? "-")（owner→\(owner) 控制=\(control)）")
+            return media.adopting(host: owner, app: app, control: control)
         }
 
         // owner 不上报（QQ音乐）：身份用 AX/窗口标题兜底，控制走系统媒体键
         return audioOnlyInfo(owner: owner, app: app, actives: actives, audible: audible)
     }
 
-    /// 让「按 app 抓音频」的探针对准**出声列表里的所有候选**（白名单最多 3 个）。
+    /// 让「按 app 抓音频」的探针对准**出声列表里的所有候选**（白名单内的 app，见 `MusicApps`）。
     /// 探针用来回答「卡片上这个 app 停了没有」（`deriveIsPlaying`）；
-    /// 只在目标集合变化时重建捕获流（队列侧判重，别每轮都塞主线程）
+    /// 只在目标集合变化时重建捕获流（队列侧判重，别每轮都塞主线程）。
+    /// 目标是「同时真在出声的白名单 app」，常态 1–2 条，白名单长短不直接放大成本
     private func syncProbeTargets(_ actives: [AudioActivity]) {
         let wanted = probeEnabled
             ? Set(actives.compactMap { a in a.bundleID.map { AppAudioProbe.Target(pid: a.pid, bundleID: $0) } })
@@ -612,7 +668,10 @@ final class NowPlayingMonitor: ObservableObject {
     private func logBlocked(_ media: NowPlayingInfo?,
                             rawActives: [AudioActivity], actives: [AudioActivity]) {
         guard Self.debug else { return }
-        let mediaSummary = media.flatMap { Self.isAllowed($0.appBundleID) ? nil : ($0.appBundleID ?? "?") } ?? "-"
+        let mediaSummary = media.flatMap {
+            let bid = Self.hostBundleID(for: $0.appBundleID)
+            return Self.isAllowed(bid) ? nil : (bid ?? "?")
+        } ?? "-"
         let activesSummary = rawActives
             .filter { !Self.isAllowed($0.bundleID) }
             .map { $0.bundleID ?? "?" }
@@ -641,7 +700,9 @@ final class NowPlayingMonitor: ObservableObject {
         // 宁可这一下不发，先把卡片刷成新的。核对走子进程（~80ms，异步，按钮不会卡）
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let freshOwner = self.readViaSubprocess()?.owner
+            // 归并到宿主再比：Safari 报的是 com.apple.WebKit.GPU，卡片上是 com.apple.Safari，
+            // 不归并的话每次点按钮都会判成「路由目标已换人」而放弃发送
+            let freshOwner = Self.hostBundleID(for: self.readViaSubprocess()?.owner)
             DispatchQueue.main.async {
                 if let freshOwner, !AudioActivityMonitor.sameApp(freshOwner, info.appBundleID) {
                     if Self.debug {
@@ -673,6 +734,21 @@ final class NowPlayingMonitor: ObservableObject {
         case .mediaKey:
             if command == .togglePlay { beginPendingToggle(for: cur) }
             MediaKey.post(Self.mediaKey(for: command))
+        case .axPress:
+            if command == .togglePlay { beginPendingToggle(for: cur) }
+            // 上一首/下一首在网页播放器里没有稳定的 AX 按钮，直接走媒体键
+            guard command == .togglePlay, let pid = cur.pid else {
+                MediaKey.post(Self.mediaKey(for: command))
+                break
+            }
+            // AX 遍历不能在主线程做（DEV-083），整段丢后台；没找到按钮就退回媒体键。
+            // 目标状态取翻转后的值：`cur` 是点击前的快照，`!cur.isPlaying` 就是用户要的
+            let toPlaying = !cur.isPlaying
+            DispatchQueue.global(qos: .userInitiated).async {
+                if !WebPlayerControl.pressPlayPause(pid: pid, toPlaying: toPlaying) {
+                    MediaKey.post(MediaKey.playPause)
+                }
+            }
         case .none:
             return
         }

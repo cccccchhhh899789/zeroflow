@@ -9,6 +9,40 @@ struct AudioActivity {
     let name: String?
 }
 
+/// 音乐类 app 白名单：**唯一来源**，别在别处再写一份。
+///
+/// 历史上 `NowPlayingMonitor.allowedBundles`（3 个）和 `AudioActivityMonitor.knownMediaBundles`
+/// （10 个）各写一份，结果是两份漂移：网易云/Spotify 明明在放歌却不出卡——它们只在排序表里，
+/// 不在闸门里。现在闸门和排序都从这里取，加一个 app 只改这一处。
+///
+/// 一律按 `sameApp` 前缀比对：酷狗 App Store 版的 bundle 是 `com.kugou.mac.Music`，
+/// 只写 `com.kugou.mac` 也能命中；helper / WebKit 媒体进程同理。
+enum MusicApps {
+    static let bundles: [String] = [
+        // 系统
+        "com.apple.Music",
+        "com.apple.podcasts",
+        "com.apple.TV",
+        // 国内
+        "com.tencent.QQMusicMac",
+        "com.netease.163music",
+        "com.soda.music",
+        "com.kugou.mac",
+        "com.wenyu.kwplayermac",
+        // 国际
+        "com.spotify.client",
+        "com.tidal.desktop",
+        "com.deezer.deezer-desktop",
+        "com.amazon.music",
+    ]
+
+    /// 是否音乐类 app（含 helper / 子 bundle）。nil = 无归属，一律 false
+    static func isMusicApp(_ bundleID: String?) -> Bool {
+        guard let bundleID else { return false }
+        return bundles.contains { AudioActivityMonitor.sameApp(bundleID, $0) }
+    }
+}
+
 /// 「谁在出声」探测器：枚举 CoreAudio 的 process object 列表，筛出正在输出音频的 app 级进程。
 ///
 /// 为什么需要它：系统 Now Playing（MediaRemote）只有 app 主动向 `MPNowPlayingInfoCenter`
@@ -124,24 +158,25 @@ enum AudioActivityMonitor {
             .max { ($0.localizedName?.count ?? 0) < ($1.localizedName?.count ?? 0) }
     }
 
-    /// 已知媒体播放器 → 0；其他出声 app（浏览器等）→ 1
-    private static func mediaRank(_ bundleID: String?) -> Int {
-        guard let bundleID else { return 1 }
-        return knownMediaBundles.contains(bundleID) ? 0 : 1
+    /// WebKit 媒体进程的 bundleID → 宿主 app 的 bundleID（按进程名归并）。
+    ///
+    /// 为什么需要：Safari 上报 Now Playing 时 **owner 是 `com.apple.WebKit.GPU`**，不是
+    /// `com.apple.Safari`（实测：`owner=com.apple.WebKit.GPU` 而 `actives=[com.apple.Safari]`）。
+    /// 不归并的话白名单判不过 → 卡片不出，图标/探针/`send()` 核对也全部对不上。
+    ///
+    /// 同名进程可能有多个（Safari 的「Safari浏览器 Graphics and Media」和微信输入法的
+    /// 「微信输入法 Graphics and Media」都是 `com.apple.WebKit.GPU`），所以用 `allowed`
+    /// 在候选宿主里挑我们真正关心的那个
+    static func webKitHostBundleID(for bundleID: String, allowed: (String?) -> Bool) -> String? {
+        let procs = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == bundleID }
+        let hosts = procs.compactMap { webKitHost(for: $0)?.bundleIdentifier }
+        return hosts.first(where: allowed) ?? hosts.first
     }
 
-    private static let knownMediaBundles: Set<String> = [
-        "com.apple.Music",
-        "com.apple.VoiceMemos",
-        "com.apple.podcasts",
-        "com.apple.TV",
-        "com.tencent.QQMusicMac",
-        "com.netease.163music",
-        "com.spotify.client",
-        "com.xiami.mac",
-        "com.kugou.mac",
-        "com.baidu.music",
-    ]
+    /// 已知媒体播放器 → 0；其他出声 app（浏览器等）→ 1。清单来源见 `MusicApps`
+    private static func mediaRank(_ bundleID: String?) -> Int {
+        MusicApps.isMusicApp(bundleID) ? 0 : 1
+    }
 
     // MARK: - CoreAudio 属性读取
 

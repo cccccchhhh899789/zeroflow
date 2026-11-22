@@ -425,7 +425,7 @@
 > **已废弃（被 DEV-090 取代）**：`updateCurrent` / `handoverCandidate` / 粘性 current 已删除，保留的是**多目标探针**本身。
 - **Pitfall:** 两个音源同时存在(Chrome 在放视频、QQ音乐也放过),把 QQ音乐暂停后,卡片停在「QQ音乐 · 已暂停」上再也不动——哪怕 Chrome 一直在响、甚至换了新视频。
 - **Cause（仍成立）:** 探针只给一个 app 建流,系统里没有任何接口能回答「另一个 app 现在是不是在响」——`audible` 是所有 app 的叠加(DEV-079),`IsRunningOutput` 暂停后不归零(DEV-075)。
-- **Prevention:** ① `AppAudioProbe` 多目标:`setTargets([Target])` 给白名单内每个「在出声列表里的 app」各建一条 16×16@1fps 纯音频流(白名单最多 3 个),每条流独立的 `Probe`(自己的 stream/generation/lastSoundAt) + 独立 `Sink` 回调代理,10Hz 汇总成 `levels: [String: Bool]` 发布;`sounding(for:)` 走 `NSLock` 保护的快照,轮询队列和主线程都能读。② `applyLevels` 发现卡片上的 app 刚静、而别的候选在响时立刻 `tick()` 催一次,否则要等最多 2s。③ `audioOnlyLatch` 增加「离开出声列表 = 停」这一条并放到「混音静没静」之前——多音源时混音永远是响的,原来那条判据等于失效。④ 诊断日志里每个候选后面带上探针结论(`bid=2.3s/响`),排查「为什么显示的是它」一眼可见。
+- **Prevention:** ① `AppAudioProbe` 多目标:`setTargets([Target])` 给白名单内每个「在出声列表里的 app」各建一条 16×16@1fps 纯音频流(白名单清单唯一来源是 `MusicApps`,目标只取「白名单内且真在出声」的 app,常态 1–2 条),每条流独立的 `Probe`(自己的 stream/generation/lastSoundAt) + 独立 `Sink` 回调代理,10Hz 汇总成 `levels: [String: Bool]` 发布;`sounding(for:)` 走 `NSLock` 保护的快照,轮询队列和主线程都能读。② `applyLevels` 发现卡片上的 app 刚静、而别的候选在响时立刻 `tick()` 催一次,否则要等最多 2s。③ `audioOnlyLatch` 增加「离开出声列表 = 停」这一条并放到「混音静没静」之前——多音源时混音永远是响的,原来那条判据等于失效。④ 诊断日志里每个候选后面带上探针结论(`bid=2.3s/响`),排查「为什么显示的是它」一眼可见。
 - **代价:** 最多 3 条捕获流(每条约一个 16×16@1fps 音频会话),面板打开且有多个音源时多占一点内存和 CPU;按 app 捕获对个别 app 不生效时该候选永远是 `nil`。媒体键仍无法定向(DEV-081)。
 - **验证:** `notchDebug` 打开,两个音源同时存在时:日志应出现多条 `AppAudio: 探测 pid=... bundle=...`(每个候选一条);暂停当前后 1~2s 内卡片切到在响的那个;日志里 `current=... [com.google.Chrome=3.2s/响 com.tencent.QQMusicMac=1.0s/静]` 这行能直接看出谁在响。
 
@@ -470,6 +470,11 @@ pluginkit -m -i com.zeroflow.app.finderSync   # 期望 "+    com.zeroflow.app.fi
 ```
 
 - **菜单不出现时的排查顺序:** `pluginkit -m -i` 是 `+` → 系统设置「登录项与扩展」里把扩展关开一次 → `killall Finder` → 上面的配方。
+
+## DEV-093: Safari 的 now playing owner 是 `com.apple.WebKit.GPU`,而且只吃系统媒体键、不吃 MR 命令
+- **Pitfall:** 白名单里明明加了 `com.apple.Safari`,Safari 放视频仍然不出卡;补上出卡后,卡片上的播放/暂停按下去毫无反应(日志照样打 `sent togglePlay via mediaRemote`)。
+- **Cause:** ① Safari 网页音视频的 owner 报的是 `com.apple.WebKit.GPU`(WebKit 的「Graphics and Media」进程),不是宿主 bundle——白名单判定、`runningApp`、探针键(`AppAudioProbe` 按宿主 bundle 建流)全部对不上;② 这个会话**虽然上报元数据**,但 `MRMediaRemoteSendCommand` / `MRMediaRemoteSendCommandToPlayer` 返回 `true` 却毫无效果,只有系统媒体键能控。实测(本地音频,Safari 播放中):MR 命令前后 `playbackRate` 恒为 1,媒体键 1→0→1。
+- **Prevention:** ① 读取入口统一归并:`NowPlayingMonitor.hostBundleID` 把 `com.apple.WebKit.*` 按进程名折回宿主(`AudioActivityMonitor.webKitHostBundleID`);同名进程会有多个(微信输入法也有 `com.apple.WebKit.GPU`),用 `allowed` 闭包在候选宿主里挑白名单内的那个。② 条目归属比对必须用**原始 owner**(`rawOwner`),拿归并后的 Safari 去比会把 Safari 误判成「不上报元数据」,白丢曲名和 MR 通道。③ WebKit 会话的 `ControlChannel` 是 `.axPress`:优先在**焦点窗口**的 AX 树里找「播放/暂停」按钮按下(`WebPlayerControl`,只搜焦点窗口——整 app 的树里有后台标签页,实测会按到别人家的按钮),找不到才退回媒体键。**别用媒体键控网页播放器**:B站这类页面会把自己的播放态顶回来,表现就是「点暂停、短暂暂停又恢复播放」(MR 命令对它更是完全无效)。④ **媒体键的 down/up 必须留 30ms 间隔**:紧贴连发会被系统当无效点击丢掉(实测 Safari 网页音频 rate 1→1;隔 30ms 再抬 1→0),而且**不报错**——这条让 mediaKey 通道长期「装了但没生效」,QQ音乐那路同样受影响;发送放在串行队列里异步做,别在主线程 sleep。⑤ 验证配方:用 `osascript -l JavaScript` 读 `MRNowPlayingRequest.localNowPlayingItem` 的 `kMRMediaRemoteNowPlayingInfoPlaybackRate`,发命令前后比对——只看返回值会被 `true` 骗;无 UI 走 `ZEROFLOW_NOWPLAYING_TOGGLE` 直接调 `send()`。⑥ 别用 `strings`/字节搜索判断构建产物是否含某处改动:短的字符串字面量会被 Swift 内联成立即数,搜不到不代表没编进去。⑦ 后台标签页里的网页播放器会自己暂停/恢复(页面 visibility 逻辑),验控制时把目标标签页切到前台,否则会误判成「控制不生效」。
 
 ## DEV-094: 更新检测依赖 CFBundleShortVersionString,而它和 GitHub tag 长期脱节
 - **Pitfall:** pbxproj 里 `MARKETING_VERSION` 恒为 `1.0`,发布 tag 已经是 `v1.5.12`;直接拿 bundle 版本跟 `releases/latest` 比,任何正式版用户都会被判「有新版本」,更新提示永远消不掉。

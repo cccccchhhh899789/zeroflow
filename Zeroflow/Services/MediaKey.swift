@@ -16,23 +16,122 @@ enum MediaKey {
     static let next: Int32 = 17        // NX_KEYTYPE_NEXT
     static let previous: Int32 = 18    // NX_KEYTYPE_PREVIOUS
 
+    /// 按下与抬起之间的间隔。
+    ///
+    /// **必须留**：紧贴着连发 down/up，系统会把整个事件当无效点击丢掉——实测 Safari
+    /// 网页音频（`playbackRate` 1→1，纹丝不动），隔 30ms 再抬就是 1→0。这曾经让
+    /// mediaKey 通道看起来「装了但从来没生效」（QQ音乐那路也一样，见 DEV-093）。
+    private static let holdMicros: useconds_t = 30_000
+
+    /// 串行队列：连点时保证 down/up 严格成对，不会交错成 down,down,up,up
+    private static let queue = DispatchQueue(label: "com.zeroflow.mediakey")
+
     static func post(_ key: Int32) {
-        for down in [true, false] {
-            let flag: Int = down ? 0xa00 : 0xb00
-            let data1 = Int(key) << 16 | (down ? 0xa : 0xb) << 8
-            guard let event = NSEvent.otherEvent(
-                with: .systemDefined,
-                location: .zero,
-                modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(flag)),
-                timestamp: 0,
-                windowNumber: 0,
-                context: nil,
-                subtype: 8,
-                data1: data1,
-                data2: -1
-            ), let cgEvent = event.cgEvent else { continue }
-            cgEvent.post(tap: .cghidEventTap)
+        queue.async {
+            send(key, down: true)
+            usleep(holdMicros)
+            send(key, down: false)
         }
+    }
+
+    private static func send(_ key: Int32, down: Bool) {
+        let flag: Int = down ? 0xa00 : 0xb00
+        let data1 = Int(key) << 16 | (down ? 0xa : 0xb) << 8
+        guard let event = NSEvent.otherEvent(
+            with: .systemDefined,
+            location: .zero,
+            modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(flag)),
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            subtype: 8,
+            data1: data1,
+            data2: -1
+        ), let cgEvent = event.cgEvent else { return }
+        cgEvent.post(tap: .cghidEventTap)
+    }
+}
+
+/// 网页播放器的播放/暂停控制：**点页面里的按钮**，不走媒体键。
+///
+/// 为什么需要：B站这类页面自己的播放态会跟 MediaRemote 抢——发媒体键过去，它暂停一下
+/// 又被自己的逻辑顶回播放（实测点击「暂停」= 短暂暂停后恢复）；`MRMediaRemoteSendCommand`
+/// 对 Safari 网页媒体更是完全无效。而直接 AX 按下页面上的「播放/暂停」按钮是**真实用户操作**，
+/// 页面不会跟自己顶，实测 rate 1→0 且稳定保持。
+///
+/// 找不到按钮（原生 `<audio>`、纯 canvas 播放器）返回 false，由调用方退回媒体键。
+/// **AX 调用一律在后台队列**，主线程碰 AX 会卡死（DEV-083）。
+enum WebPlayerControl {
+    /// 切换型按钮（按一下翻转，不看当前状态）
+    private static let toggleTitles = ["播放/暂停", "播放或暂停", "Play/Pause", "Play or pause"]
+    private static let playTitles = ["播放", "Play"]
+    private static let pauseTitles = ["暂停", "Pause"]
+
+    /// 按页面里的播放/暂停按钮。返回 false = 没找到可点的按钮
+    static func pressPlayPause(pid: pid_t, toPlaying: Bool) -> Bool {
+        guard pid > 0 else { return false }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 1.0)
+        // **只搜焦点窗口**：整个 app 的树里包含后台标签页，多个视频页时很容易按错
+        // 别人家的按钮（实测：当前播的是原生音频，却按到了后台 B站 标签页的按钮）。
+        // 焦点窗口里没有按钮就老实退回媒体键
+        let root = element(app, kAXFocusedWindowAttribute) ?? app
+        guard let button = findButton(in: root, toPlaying: toPlaying) else {
+            if NowPlayingMonitor.debug { ZSLog("WebPlayer: 没找到播放按钮，退回媒体键") }
+            return false
+        }
+        let ok = AXUIElementPerformAction(button, kAXPressAction as CFString) == .success
+        if NowPlayingMonitor.debug {
+            ZSLog("WebPlayer: AX 按下「\(title(of: button) ?? "?")」ok=\(ok)")
+        }
+        return ok
+    }
+
+    /// 深度优先找按钮。节点数设上限——Safari 的网页 AX 树动辄上万节点，
+    /// 无上限遍历会把点击拖到几百毫秒
+    private static func findButton(in root: AXUIElement, toPlaying: Bool) -> AXUIElement? {
+        var budget = 6000
+        var directional: AXUIElement?
+        var stack: [(AXUIElement, Int)] = [(root, 0)]
+        while let (element, depth) = stack.popLast() {
+            guard budget > 0 else { break }
+            budget -= 1
+            guard depth < 60 else { continue }
+            if role(of: element) == "AXButton" {
+                let name = title(of: element) ?? description(of: element) ?? ""
+                if toggleTitles.contains(where: { name.contains($0) }) { return element }
+                if directional == nil {
+                    let wants = toPlaying ? playTitles : pauseTitles
+                    if wants.contains(name) { directional = element }
+                }
+            }
+            for child in children(of: element) { stack.append((child, depth + 1)) }
+        }
+        return directional
+    }
+
+    private static func role(of element: AXUIElement) -> String? { string(element, kAXRoleAttribute) }
+    private static func title(of element: AXUIElement) -> String? { string(element, kAXTitleAttribute) }
+    private static func description(of element: AXUIElement) -> String? { string(element, kAXDescriptionAttribute) }
+
+    private static func string(_ element: AXUIElement, _ name: String) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    private static func element(_ element: AXUIElement, _ name: String) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success,
+              let v = value, CFGetTypeID(v) == AXUIElementGetTypeID() else { return nil }
+        return (v as! AXUIElement)
+    }
+
+    private static func children(of element: AXUIElement) -> [AXUIElement] {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success,
+              let list = value as? [AXUIElement] else { return [] }
+        return list
     }
 }
 
